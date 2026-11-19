@@ -142,6 +142,11 @@ public final class RemoteHostSession {
         return host.capabilities.contains(RemoteProtocol.sessionStop)
     }
 
+    public var isSessionResumeSupported: Bool {
+        guard case .connected(let host) = connectionState else { return false }
+        return host.capabilities.contains(RemoteProtocol.sessionResume)
+    }
+
     public var isDocumentsSupported: Bool {
         guard case .connected(let host) = connectionState else { return false }
         return host.capabilities.contains(RemoteProtocol.documents)
@@ -505,6 +510,23 @@ public final class RemoteHostSession {
             throw RemoteClientError.invalidResponse("stopSession returned \(result.kind)")
         }
         await refreshInventory()
+    }
+
+    /// Resumes an ended agent's conversation, or with `restart` quits a running agent and resumes
+    /// it. The agent gets a grace period to quit, so the request waits longer than usual; the
+    /// inventory is refreshed even when it fails, since the agent may have stopped.
+    public func resumeSession(_ sessionID: UUID, restart: Bool) async throws {
+        guard isSessionResumeSupported else {
+            throw RemoteClientError.invalidResponse("Update Chauffeur on the Mac to resume sessions remotely.")
+        }
+        guard let connection else { throw RemoteClientError.disconnected }
+        let result: RemoteResult
+        do { result = try await connection.request(.resumeSession(ResumeSessionRequest(sessionID: sessionID, restart: restart)), timeout: .seconds(60)) }
+        catch { await refreshInventory(); throw error }
+        await refreshInventory()
+        guard case .ack = result else {
+            throw RemoteClientError.invalidResponse("resumeSession returned \(result.kind)")
+        }
     }
 
     /// Approves or declines an agent removing its own worktree, then refreshes the inventory so the

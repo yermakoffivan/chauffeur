@@ -171,6 +171,19 @@ public struct StopSessionRequest: Codable, Equatable, Sendable {
     }
 }
 
+/// Resumes an ended agent's conversation. With `restart`, a running agent is first asked to
+/// quit, interrupting any turn, so it starts again in the same conversation; that is how an
+/// agent picks up an updated CLI or Chauffeur's new tools. Without it, a running agent is refused.
+public struct ResumeSessionRequest: Codable, Equatable, Sendable {
+    public var sessionID: UUID
+    public var restart: Bool
+
+    public init(sessionID: UUID, restart: Bool = false) {
+        self.sessionID = sessionID
+        self.restart = restart
+    }
+}
+
 /// One piece of a file the phone sends to the Mac. Chunks arrive in order; `offset` is where
 /// `data` starts, and the upload finishes when `offset + data.count == totalBytes`. Resending a
 /// chunk the Mac already has is accepted, so a retry after a lost response is safe.
@@ -220,6 +233,7 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
     case resolveTicket(ResolveTicketRequest)
     case createGroup(CreateGroupRequest)
     case stopSession(StopSessionRequest)
+    case resumeSession(ResumeSessionRequest)
     case listSessionDocuments(SessionDocumentsRequest)
     case readDocument(DocumentReadRequest)
     case readDocumentChunk(DocumentChunkRequest)
@@ -248,6 +262,7 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
         case .resolveTicket: return "resolveTicket"
         case .createGroup: return "createGroup"
         case .stopSession: return "stopSession"
+        case .resumeSession: return "resumeSession"
         case .listSessionDocuments: return "listSessionDocuments"
         case .readDocument: return "readDocument"
         case .readDocumentChunk: return "readDocumentChunk"
@@ -298,6 +313,8 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
             self = .createGroup(try container.decode(CreateGroupRequest.self, forKey: .payload))
         case "stopSession":
             self = .stopSession(try container.decode(StopSessionRequest.self, forKey: .payload))
+        case "resumeSession":
+            self = .resumeSession(try container.decode(ResumeSessionRequest.self, forKey: .payload))
         case "listSessionDocuments":
             self = .listSessionDocuments(try container.decode(SessionDocumentsRequest.self, forKey: .payload))
         case "readDocument":
@@ -361,6 +378,8 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
         case .createGroup(let payload):
             try container.encode(payload, forKey: .payload)
         case .stopSession(let payload):
+            try container.encode(payload, forKey: .payload)
+        case .resumeSession(let payload):
             try container.encode(payload, forKey: .payload)
         case .listSessionDocuments(let payload):
             try container.encode(payload, forKey: .payload)

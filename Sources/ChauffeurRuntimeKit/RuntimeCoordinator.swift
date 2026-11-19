@@ -28,6 +28,12 @@ public actor RuntimeCoordinator {
     private var suspendingProjects = Set<UUID>()
     /// Projects mid-suspend: launches and resumes are refused before any session is marked.
     private var projectsBeingSuspended = Set<UUID>()
+    /// Sessions being quit and resumed by `restartSession`.
+    private var restartingSessions = Set<UUID>()
+    /// Restarting sessions whose own graceful stop is in flight.
+    private var restartStops = Set<UUID>()
+    /// Restarting sessions something else stopped meanwhile, which therefore stay stopped.
+    private var interruptedRestarts = Set<UUID>()
     /// Worktrees their own session asked to remove: nothing starts in them while it ends.
     private var worktreesPendingRemoval = Set<UUID>()
     /// How long a session that removes its own worktree keeps running, so the tool's reply reaches it.
@@ -969,6 +975,7 @@ public actor RuntimeCoordinator {
             return try .from(await Task.detached { RepositoryDiscovery.scan(parent: parent) }.value)
         case "launch": return try .from(await launch(params.decode(LaunchRequest.self)))
         case "resume": return try .from(await resume(params.uuid("sessionID"), restoring: false))
+        case "restartSession": return try .from(await restartSession(params.uuid("sessionID")))
         case "suspendPlan": return try .from(await suspendPlan(params.uuid("projectID")))
         case "suspendProject":
             let ending = Set((params["endMissingCheckouts"].array ?? []).compactMap { $0.string.flatMap(UUID.init(uuidString:)) })
@@ -1000,6 +1007,7 @@ public actor RuntimeCoordinator {
                 throw ChauffeurError("missing_session", "Session not found")
             }
             guard stopRequests.insert(sessionID).inserted else { throw ChauffeurError("stop_pending", "Stop is already in progress") }
+            if restartingSessions.contains(sessionID) && !restartStops.contains(sessionID) { interruptedRestarts.insert(sessionID) }
             defer {
                 stopRequests.remove(sessionID)
                 if sessions[sessionID]?.state.isLive != true { stopping.remove(sessionID) }
@@ -2057,7 +2065,8 @@ public actor RuntimeCoordinator {
     }
 
     /// - Parameter restoring: a project restore resuming one of its suspended sessions.
-    private func resume(_ sessionID: UUID, restoring: Bool) async throws -> Session {
+    private func resume(_ sessionID: UUID, restoring: Bool, restarting: Bool = false) async throws -> Session {
+        guard restarting || !restartingSessions.contains(sessionID) else { throw ChauffeurError("restart_pending", "This session is restarting") }
         let generation = stopGenerations[sessionID, default: 0]
         try await reconcile()
         guard !stoppingAllSessions, generation == stopGenerations[sessionID, default: 0], !stopRequests.contains(sessionID) else { throw ChauffeurError("stop_pending", "Stop is still in progress. Resume after it finishes") }
@@ -2080,6 +2089,52 @@ public actor RuntimeCoordinator {
         launchTasks[sessionID] = task
         defer { launching.remove(sessionID); launchTasks.removeValue(forKey: sessionID); conversationReservations.removeValue(forKey: sessionID) }
         return try await task.value
+    }
+    /// Quits a running agent and resumes the same conversation, so it starts again with the
+    /// installed CLI and Chauffeur's current tools. An ended session is just resumed. Everything
+    /// resuming would refuse is checked before stopping, and so is the conversation's transcript,
+    /// so a refused restart leaves the agent running.
+    private func restartSession(_ sessionID: UUID) async throws -> Session {
+        try await reconcile()
+        guard let session = sessions[sessionID] else { throw ChauffeurError("missing_session", "Session not found") }
+        guard session.state.isLive else { return try await resume(sessionID, restoring: false) }
+        guard restartingSessions.insert(sessionID).inserted else { throw ChauffeurError("restart_pending", "This session is already restarting") }
+        defer { restartingSessions.remove(sessionID); interruptedRestarts.remove(sessionID) }
+        let kind = session.launch.preset.kind
+        guard kind.supportsSuspension else { throw ChauffeurError("restart_unavailable", "\(kind.displayName) sessions can't be restarted yet") }
+        guard session.parentID == nil else { throw ChauffeurError("restart_unavailable", "Delegated workers can't be restarted. Ask their coordinator to replace them instead") }
+        guard session.closureOutcome == nil else { throw ChauffeurError("restart_unavailable", "This delegated attempt is closed") }
+        guard let conversation = session.nativeConversationID else { throw ChauffeurError("restart_unavailable", "Chauffeur doesn't know this session's conversation yet, so it couldn't resume it. Send the agent a message first") }
+        guard !isSuspended(session.projectID) else { throw ChauffeurError("project_suspended", "This project is suspended. Restore it first") }
+        guard session.worktreeID.map(worktreesPendingRemoval.contains) != true else { throw ChauffeurError("worktree_busy", "This session's worktree is being removed") }
+        guard !launching.contains(sessionID), !stopRequests.contains(sessionID) else { throw ChauffeurError("restart_pending", "This session is already starting or stopping") }
+        let configuration = Paths.canonical(session.launch.configurationPath), checkout = session.launch.workingDirectory
+        let saved = await Task.detached { RecentConversationScanner.hasTranscript(kind: kind, id: conversation, checkout: checkout, configuration: configuration) }.value
+        guard saved else { throw ChauffeurError("restart_unavailable", "Chauffeur can't find this conversation's saved transcript, so restarting could lose it") }
+        try await resumePreflight(session)
+        // The checks awaited: a stop, a close or another conversation since means there is nothing to restart.
+        guard !interruptedRestarts.contains(sessionID), let current = sessions[sessionID], current.state.isLive,
+              current.terminalIdentity == session.terminalIdentity, current.nativeConversationID == conversation else {
+            throw ChauffeurError("restart_cancelled", "“\(session.title)” changed while Chauffeur checked it. Try again")
+        }
+        try await stopGracefully(sessionID, restarting: true)
+        guard sessions[sessionID]?.state.isLive == false else { throw ChauffeurError("restart_failed", "“\(session.title)” did not stop") }
+        guard !interruptedRestarts.contains(sessionID) else {
+            throw ChauffeurError("restart_cancelled", "“\(session.title)” was stopped while it restarted, so it wasn't resumed")
+        }
+        do { return try await resume(sessionID, restoring: false, restarting: true) }
+        catch {
+            let reason = (error as? ChauffeurError) ?? ChauffeurError("resume_failed", error.localizedDescription)
+            throw ChauffeurError(reason.code, "“\(session.title)” stopped but didn't resume: \(reason.errorDescription ?? reason.message). Resume it again to continue its conversation")
+        }
+    }
+    /// Resume's checks that change nothing, so a restart refuses before stopping the agent:
+    /// the checkout is still the recorded one, its configuration exists, and the CLI resolves.
+    private func resumePreflight(_ session: Session) async throws {
+        // An older identity record is relinked by the resume itself, which saves the session.
+        if (session.launch.checkoutIdentityVersion ?? 0) >= CheckoutIdentity.currentVersion { try await worktrees.validateResume(session.launch) }
+        _ = try LaunchPolicy.configurationDirectory(session.launch.configurationPath, kind: session.launch.preset.kind, allowMissing: session.launch.configurationUsesDefault == true)
+        _ = try Paths.executable(session.launch.preset.executable, environment: baseEnvironment)
     }
     /// Refuses a conversation another live or starting session continues, else
     /// reserves it for `sessionID` until the caller releases it.
@@ -2211,18 +2266,23 @@ public actor RuntimeCoordinator {
     }
 
     /// Asks the agent to quit so it saves its conversation, then forces the terminal closed
-    /// if it is still running a few seconds later. Used by suspension and self-removal.
-    private func stopGracefully(_ sessionID: UUID) async throws {
-        let params: JSONValue = .object(["sessionID": .string(sessionID.uuidString)])
-        _ = try await handle(IPCRequest("stop", params: params))
+    /// if it is still running a few seconds later. Used by suspension, self-removal and restart;
+    /// a restart's own stops don't count as something else stopping the session.
+    private func stopGracefully(_ sessionID: UUID, restarting: Bool = false) async throws {
+        func stop(force: Bool) async throws {
+            if restarting { restartStops.insert(sessionID) }
+            defer { if restarting { restartStops.remove(sessionID) } }
+            var fields: [String: JSONValue] = ["sessionID": .string(sessionID.uuidString)]
+            if force { fields["force"] = .bool(true) }
+            _ = try await handle(IPCRequest("stop", params: .object(fields)))
+        }
+        try await stop(force: false)
         let deadline = Date().addingTimeInterval(Self.suspendGracePeriod)
         while sessions[sessionID]?.state.isLive == true, Date() < deadline {
             try await Task.sleep(for: .milliseconds(100))
             try await reconcile()
         }
-        if sessions[sessionID]?.state.isLive == true {
-            _ = try await handle(IPCRequest("stop", params: .object(["sessionID": .string(sessionID.uuidString), "force": .bool(true)])))
-        }
+        if sessions[sessionID]?.state.isLive == true { try await stop(force: true) }
     }
 
     /// Resumes the chosen suspended sessions in launch order. The rest stop being suspended

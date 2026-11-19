@@ -177,6 +177,9 @@ struct RemoteHostSessionTests {
         #expect(!session.isSessionStopSupported)
         await #expect(throws: RemoteClientError.self) { try await session.stopSession(UUID()) }
         #expect(factory.hosts[0].requests(ofKind: "stopSession").isEmpty)
+        #expect(!session.isSessionResumeSupported)
+        await #expect(throws: RemoteClientError.self) { try await session.resumeSession(UUID(), restart: true) }
+        #expect(factory.hosts[0].requests(ofKind: "resumeSession").isEmpty)
         #expect(!session.isProjectSuspensionSupported)
         await #expect(throws: RemoteClientError.self) { _ = try await session.suspendPlan(projectID: UUID()) }
         await #expect(throws: RemoteClientError.self) { _ = try await session.restoreProject(UUID(), sessionIDs: []) }
@@ -195,6 +198,20 @@ struct RemoteHostSessionTests {
         let request = try #require(factory.hosts[0].requests(ofKind: "stopSession").first)
         guard case .stopSession(let stop) = request.operation else { Issue.record("Missing stopSession"); return }
         #expect(stop.sessionID == id && stop.force)
+        #expect(factory.hosts[0].requests(ofKind: "listInventory").count > inventoryRequests)
+    }
+
+    @Test func resumeSessionSendsTheRestartChoiceAndRefreshesInventory() async throws {
+        let (session, factory) = makeSession()
+        await session.connect()
+        defer { session.disconnect() }
+        let id = UUID()
+        #expect(session.isSessionResumeSupported)
+        let inventoryRequests = factory.hosts[0].requests(ofKind: "listInventory").count
+        try await session.resumeSession(id, restart: true)
+        let request = try #require(factory.hosts[0].requests(ofKind: "resumeSession").first)
+        guard case .resumeSession(let resume) = request.operation else { Issue.record("Missing resumeSession"); return }
+        #expect(resume.sessionID == id && resume.restart)
         #expect(factory.hosts[0].requests(ofKind: "listInventory").count > inventoryRequests)
     }
 

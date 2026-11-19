@@ -44,6 +44,7 @@ struct EnvelopeTests {
             .resolveTicket(ResolveTicketRequest(projectID: UUID(), folderID: UUID(), text: "https://acme.atlassian.net/browse/MBL-1")),
             .createGroup(CreateGroupRequest(projectID: UUID(), name: "Review")),
             .stopSession(StopSessionRequest(sessionID: UUID(), force: true)),
+            .resumeSession(ResumeSessionRequest(sessionID: UUID(), restart: true)),
             .getSuspendPlan(SuspendPlanRequest(projectID: UUID())),
             .suspendProject(SuspendProjectRequest(projectID: UUID(), interruptBusy: true)),
             .restoreProject(RestoreProjectRequest(projectID: UUID(), sessionIDs: [UUID()], shownSessionIDs: [UUID(), UUID()])),
@@ -122,7 +123,7 @@ struct EnvelopeTests {
             "hello", "pair", "listInventory", "listWorktreeBranches", "previewWorktreeDestination", "launch",
             "getOperationStatus", "attachTerminal", "terminalResize", "detachTerminal", "getKeepAwake",
             "setKeepAwakeSettings", "setKeepAwakeTimer", "resolveTicket", "createGroup", "stopSession",
-            "getSuspendPlan", "suspendProject", "restoreProject", "answerWorktreeRemoval"
+            "resumeSession", "getSuspendPlan", "suspendProject", "restoreProject", "answerWorktreeRemoval"
         ]
     ))
     func remoteOperationKindStrings(operation: RemoteOperation, expectedKind: String) throws {

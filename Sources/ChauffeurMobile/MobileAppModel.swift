@@ -120,6 +120,8 @@ final class MobileAppModel {
     private(set) var selectedTab: UUID?
     /// One controller per open tab, created lazily once the session is connected.
     private(set) var terminals: [UUID: RemoteSessionController] = [:]
+    /// Sessions being resumed or restarted from this phone.
+    private(set) var resumingSessions: Set<UUID> = []
     private(set) var keepAwakeMutationPending = false
     private(set) var keepAwakeMutationError: String?
     /// A session link waiting for a connection to the selected Mac (or for its inventory).
@@ -227,6 +229,11 @@ final class MobileAppModel {
     var documentsAreSupported: Bool {
         guard isConnected else { return false }
         return session?.isDocumentsSupported ?? false
+    }
+
+    var sessionResumeIsSupported: Bool {
+        guard isConnected else { return false }
+        return session?.isSessionResumeSupported ?? false
     }
 
     var groupCreationIsSupported: Bool {
@@ -586,6 +593,30 @@ final class MobileAppModel {
         case .attaching, .attached, .controlLost, .ended:
             break
         }
+    }
+
+    /// Resumes an ended agent's conversation, or with `restart` quits a running agent and resumes
+    /// it. Its old terminal ended with the process, so the tab attaches the new one.
+    func resumeSession(_ sessionID: UUID, restart: Bool) async throws {
+        guard let session else { throw RemoteClientError.disconnected }
+        guard resumingSessions.insert(sessionID).inserted else { return }
+        defer { resumingSessions.remove(sessionID) }
+        do { try await session.resumeSession(sessionID, restart: restart) }
+        catch {
+            // A request that timed out may still have resumed the agent.
+            await reattachIfResumed(sessionID)
+            throw error
+        }
+        await reattachIfResumed(sessionID)
+    }
+
+    /// Replaces a tab's ended terminal once its session runs again, resumed here or on the Mac:
+    /// the old one ended with the previous process and never attaches again.
+    func reattachIfResumed(_ sessionID: UUID) async {
+        guard self.session(sessionID)?.state.isLive == true, let ended = terminals[sessionID], case .ended = ended.state else { return }
+        terminals.removeValue(forKey: sessionID)
+        await ended.detach()
+        await attachSelectedTerminalIfNeeded()
     }
 
     /// Explicit user action only.

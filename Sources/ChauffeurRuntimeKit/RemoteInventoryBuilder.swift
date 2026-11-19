@@ -78,6 +78,8 @@ public struct RemoteInventoryBuilder {
         summaries.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 
         var sessions: [SessionSummary] = []
+        // Nothing resumes in a suspended project until its restore.
+        let suspendedProjects = Set(view.sessions.filter { $0.suspendedAt != nil }.map(\.projectID))
         for session in view.sessions {
             let worktree = session.worktreeID.flatMap { id in worktrees.first { $0.id == id } }
             let branch: String?
@@ -104,7 +106,8 @@ public struct RemoteInventoryBuilder {
                 updatedAt: session.updatedAt,
                 progress: RemoteProgressReader.summary(session: session),
                 suspendedAt: session.suspendedAt,
-                restoreError: session.suspendedAt != nil && !session.state.isLive ? session.error : nil
+                restoreError: session.suspendedAt != nil && !session.state.isLive ? session.error : nil,
+                resumable: !suspendedProjects.contains(session.projectID) && (session.canResumeConversation || session.canRestartConversation)
             ))
         }
         sessions.sort { $0.createdAt < $1.createdAt }

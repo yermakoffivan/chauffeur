@@ -274,6 +274,9 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
     public var suspendedAt: Date?
     /// Why the last restore couldn't resume this suspended session.
     public var restoreError: String?
+    /// An agent whose conversation `resumeSession` can resume: an ended one, or a running one
+    /// it can restart. Nil from Macs without `sessionResume`.
+    public var resumable: Bool?
 
     public init(
         id: UUID,
@@ -291,7 +294,8 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
         updatedAt: Date,
         progress: SessionProgressSummary? = nil,
         suspendedAt: Date? = nil,
-        restoreError: String? = nil
+        restoreError: String? = nil,
+        resumable: Bool? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -309,6 +313,7 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
         self.progress = progress
         self.suspendedAt = suspendedAt
         self.restoreError = restoreError
+        self.resumable = resumable
     }
 }
 

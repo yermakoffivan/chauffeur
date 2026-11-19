@@ -15,6 +15,8 @@ import ChauffeurTerminalTesting
 struct SessionTerminalView: View {
     var model: MobileAppModel
     @State private var keyboardOverlap: CGFloat = 0
+    @State private var confirmingRestart: SessionSummary?
+    @State private var resumeFailure: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -83,6 +85,20 @@ struct SessionTerminalView: View {
                             }
                             .accessibilityIdentifier("terminal-documents")
                         }
+                        if let session = resumable(sessionID) {
+                            // A terminal that ended while the agent runs again needs Attach, not another restart.
+                            if session.state.isLive && !terminalEnded(sessionID) {
+                                Button("Restart Conversation…", systemImage: "arrow.clockwise") {
+                                    confirmingRestart = session
+                                }
+                                .accessibilityIdentifier("terminal-restart")
+                            } else if !session.state.isLive {
+                                Button("Resume Conversation", systemImage: "play") {
+                                    resume(sessionID, restart: false)
+                                }
+                                .accessibilityIdentifier("terminal-resume")
+                            }
+                        }
                         Button("Close", systemImage: "xmark.rectangle") {
                             close(sessionID)
                         }
@@ -92,6 +108,40 @@ struct SessionTerminalView: View {
         }
         .task(id: model.selectedTab) {
             await model.attachSelectedTerminalIfNeeded()
+        }
+        .confirmationDialog(
+            "Restart “\(confirmingRestart?.title ?? "")”?",
+            isPresented: Binding(get: { confirmingRestart != nil }, set: { if !$0 { confirmingRestart = nil } }),
+            titleVisibility: .visible,
+            presenting: confirmingRestart
+        ) { session in
+            Button("Restart") { resume(session.id, restart: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("The agent quits and resumes the same conversation, picking up updated tools and settings. A turn in progress is interrupted.")
+        }
+        .alert("Couldn't resume", isPresented: Binding(get: { resumeFailure != nil }, set: { if !$0 { resumeFailure = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(resumeFailure ?? "")
+        }
+    }
+
+    /// The session when the Mac can resume or restart its conversation from here.
+    private func resumable(_ sessionID: UUID) -> SessionSummary? {
+        guard model.sessionResumeIsSupported, let session = model.session(sessionID), session.resumable == true else { return nil }
+        return session
+    }
+
+    private func terminalEnded(_ sessionID: UUID) -> Bool {
+        if case .ended = model.terminals[sessionID]?.state { return true }
+        return false
+    }
+
+    private func resume(_ sessionID: UUID, restart: Bool) {
+        Task {
+            do { try await model.resumeSession(sessionID, restart: restart) }
+            catch { resumeFailure = (error as? RemoteClientError)?.userMessage ?? error.localizedDescription }
         }
     }
 
@@ -125,7 +175,17 @@ struct SessionTerminalView: View {
 
     @ViewBuilder
     private func banner(for sessionID: UUID, controller: RemoteSessionController?) -> some View {
-        if !model.isConnected {
+        if model.resumingSessions.contains(sessionID) {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text("Resuming the conversation…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        } else if !model.isConnected {
             StatusBanner(
                 title: "Disconnected · Last screen, not live",
                 message: connectionMessage,
@@ -153,12 +213,30 @@ struct SessionTerminalView: View {
                     Task { await model.retryTerminal(sessionID) }
                 }
             case .ended:
-                StatusBanner(
-                    title: "Session ended",
-                    message: "The process exited on your Mac. Close it or launch a new session.",
-                    actionTitle: "Close"
-                ) {
-                    close(sessionID)
+                if model.session(sessionID)?.state.isLive == true {
+                    StatusBanner(
+                        title: "Session running again",
+                        message: "This session was resumed. Attach to its new terminal.",
+                        actionTitle: "Attach"
+                    ) {
+                        Task { await model.reattachIfResumed(sessionID) }
+                    }
+                } else if resumable(sessionID)?.state.isLive == false {
+                    StatusBanner(
+                        title: "Session ended",
+                        message: "The process exited on your Mac. Resume its conversation, or close it.",
+                        actionTitle: "Resume conversation"
+                    ) {
+                        resume(sessionID, restart: false)
+                    }
+                } else {
+                    StatusBanner(
+                        title: "Session ended",
+                        message: "The process exited on your Mac. Close it or launch a new session.",
+                        actionTitle: "Close"
+                    ) {
+                        close(sessionID)
+                    }
                 }
             case .idle:
                 StatusBanner(

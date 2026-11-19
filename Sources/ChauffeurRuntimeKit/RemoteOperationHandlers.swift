@@ -164,6 +164,12 @@ public actor RemoteOperationHandlers {
                 _ = try await runtime.handle(IPCRequest("stop", params: params))
                 return .success(.ack)
             } catch { return .failure(Self.remoteError(error)) }
+        case .resumeSession(let request):
+            do {
+                let params: JSONValue = .object(["sessionID": .string(request.sessionID.uuidString)])
+                _ = try await runtime.handle(IPCRequest(request.restart ? "restartSession" : "resume", params: params))
+                return .success(.ack)
+            } catch { return .failure(Self.remoteError(error)) }
         case .getSuspendPlan(let request):
             do {
                 let plan = try await runtime.handle(IPCRequest("suspendPlan", params: .object(["projectID": .string(request.projectID.uuidString)])))

@@ -44,6 +44,7 @@ struct RemoteProjectSuspensionTests {
         }
         let suspended = try #require(try await handlers.inventory().sessions.first { $0.id == launched.id })
         #expect(!suspended.state.isLive && suspended.suspendedAt != nil && suspended.restoreError == nil)
+        #expect(suspended.resumable == false, "Only the project's restore resumes it")
         guard case .failure(let again) = await handlers.handle(.getSuspendPlan(SuspendPlanRequest(projectID: projectID)), deviceID: UUID()) else {
             Issue.record("A suspended project was planned again"); return
         }
@@ -72,6 +73,58 @@ struct RemoteProjectSuspensionTests {
         #expect(result.restored == [launched.id] && result.failures.isEmpty)
         let restored = try #require(try await handlers.inventory().sessions.first { $0.id == launched.id })
         #expect(restored.state.isLive && restored.suspendedAt == nil)
+        _ = try await fixture.stop()
+    }
+
+    @Test func remoteRestartResumesTheSameConversationAndAnEndedSessionResumes() async throws {
+        let fixture = try await LaunchFixture.make(); defer { fixture.cleanup() }
+        let handlers = RemoteOperationHandlers(runtime: fixture.runtime, root: fixture.root, hostName: "Fixture", isAttached: { _ in false })
+        let launched = try await fixture.runtime.launch(fixture.request)
+        let conversation = try #require(launched.nativeConversationID)
+
+        // Without a saved transcript, restarting could lose the conversation, so the agent keeps running.
+        guard case .failure(let unsaved) = await handlers.handle(.resumeSession(ResumeSessionRequest(sessionID: launched.id, restart: true)), deviceID: UUID()) else {
+            Issue.record("Restarted without a transcript"); return
+        }
+        #expect(unsaved.code == "restart_unavailable")
+        #expect(try await handlers.inventory().sessions.first { $0.id == launched.id }?.state.isLive == true)
+
+        try writeClaudeTranscript(fixture, id: conversation)
+        #expect(try await handlers.inventory().sessions.first { $0.id == launched.id }?.resumable == true)
+        guard case .failure(let live) = await handlers.handle(.resumeSession(ResumeSessionRequest(sessionID: launched.id)), deviceID: UUID()) else {
+            Issue.record("Resumed a running session"); return
+        }
+        #expect(live.code == "already_live")
+
+        guard case .success(.ack) = await handlers.handle(.resumeSession(ResumeSessionRequest(sessionID: launched.id, restart: true)), deviceID: UUID()) else {
+            Issue.record("Restart was not acknowledged"); return
+        }
+        let restarted = try #require(try await fixture.runtime.snapshot()["sessions"].decode([Session].self).first { $0.id == launched.id })
+        #expect(restarted.state.isLive && restarted.nativeConversationID == conversation && restarted.terminalIdentity != launched.terminalIdentity)
+
+        _ = try await fixture.runtime.handle(IPCRequest("stop", params: .object(["sessionID": .string(launched.id.uuidString), "force": .bool(true)])))
+        try await fixture.runtime.reconcile()
+        let ended = try #require(try await handlers.inventory().sessions.first { $0.id == launched.id })
+        #expect(!ended.state.isLive && ended.resumable == true)
+        guard case .success(.ack) = await handlers.handle(.resumeSession(ResumeSessionRequest(sessionID: launched.id)), deviceID: UUID()) else {
+            Issue.record("Resume was not acknowledged"); return
+        }
+        #expect(try await handlers.inventory().sessions.first { $0.id == launched.id }?.state.isLive == true)
+        _ = try await fixture.stop()
+    }
+
+    @Test func aRestartThatCouldNotResumeLeavesTheAgentRunning() async throws {
+        let fixture = try await LaunchFixture.make(); defer { fixture.cleanup() }
+        let handlers = RemoteOperationHandlers(runtime: fixture.runtime, root: fixture.root, hostName: "Fixture", isAttached: { _ in false })
+        let launched = try await fixture.runtime.launch(fixture.request)
+        try writeClaudeTranscript(fixture, id: try #require(launched.nativeConversationID))
+        // The CLI was uninstalled while the agent ran, so resuming would fail after the stop.
+        try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("fixture.py"))
+        guard case .failure = await handlers.handle(.resumeSession(ResumeSessionRequest(sessionID: launched.id, restart: true)), deviceID: UUID()) else {
+            Issue.record("Restarted an agent that can't resume"); return
+        }
+        let session = try #require(try await fixture.runtime.snapshot()["sessions"].decode([Session].self).first { $0.id == launched.id })
+        #expect(session.state.isLive && session.terminalIdentity == launched.terminalIdentity)
         _ = try await fixture.stop()
     }
 }

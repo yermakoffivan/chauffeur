@@ -117,3 +117,15 @@ public extension CLIKind {
     /// when its trusted hooks report the conversation (see `ProjectSuspensionPlanner`).
     var supportsSuspension: Bool { self == .claude || self == .codex }
 }
+
+public extension Session {
+    /// An ended agent with a recorded conversation that wasn't closed, which Resume continues.
+    var canResumeConversation: Bool {
+        !state.isLive && launch.preset.kind.isAgent && nativeConversationID != nil && closureOutcome == nil
+    }
+    /// A running agent that Restart can quit and resume in the same conversation: one whose
+    /// conversation suspension can resume too. Delegated workers are left to their coordinator.
+    var canRestartConversation: Bool {
+        state.isLive && launch.preset.kind.supportsSuspension && nativeConversationID != nil && closureOutcome == nil && parentID == nil
+    }
+}
