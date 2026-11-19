@@ -530,6 +530,8 @@ struct PresetEditor: View {
     @State private var archived = false
     @State private var version: String?
     @State private var failure: String?
+    @State private var confirmingDeletion = false
+    @State private var deleting = false
     private var teamName: String? { model.presetSets.first { $0.id == setID }?.name }
     private var title: String {
         let action = preset == nil ? "Create Agent Preset" : "Edit Agent Preset"
@@ -565,7 +567,12 @@ struct PresetEditor: View {
             Text("Separate options with spaces or newlines. Quote values containing spaces, for example: --model \"model name\". Shell variables and commands are not expanded.").font(.caption).foregroundStyle(.secondary)
             if let failure { Text(failure).foregroundStyle(.red) }
             HStack {
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction); Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                if preset != nil {
+                    Button("Delete…", role: .destructive) { confirmingDeletion = true }
+                        .disabled(deleting || version == nil).accessibilityIdentifier("preset.delete")
+                }
+                Spacer()
                 Button("Save Agent Preset") {
                     var value = preset ?? AgentPreset(setID: setID, name: effectiveName, kind: kind, executable: executable, configurationDirectory: "")
                     value.name = effectiveName; value.kind = kind; value.executable = executable; value.configurationDirectory = ""
@@ -574,6 +581,24 @@ struct PresetEditor: View {
                 }.keyboardShortcut(.defaultAction).accessibilityIdentifier("preset.save")
             }
         }.padding(24).frame(width: 650)
+            .confirmationDialog("Delete \(preset?.name ?? "agent preset")?", isPresented: $confirmingDeletion, titleVisibility: .visible) {
+                Button("Delete Agent Preset", role: .destructive) { delete() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Removes this agent from \(teamName ?? "the team"). Its CLI configuration folder and session history are preserved. To keep it but hide it from launches, archive it instead.")
+            }
             .onAppear { name = preset?.name ?? ""; kind = preset?.kind ?? .codex; executable = preset?.executable ?? "codex"; arguments = preset.map { $0.rawArguments ?? ArgumentText.format($0.arguments) } ?? ""; archived = preset?.archived ?? false; version = model.snapshot.store.presets.first { $0.value.id == preset?.id }?.version }
+    }
+    private func delete() {
+        guard let preset, let version else { return }
+        deleting = true
+        Task {
+            defer { deleting = false }
+            do {
+                _ = try await model.call("deletePreset", .object(["presetID": .string(preset.id.uuidString), "version": .string(version)]))
+                try await model.refresh()
+                dismiss()
+            } catch { failure = error.localizedDescription }
+        }
     }
 }

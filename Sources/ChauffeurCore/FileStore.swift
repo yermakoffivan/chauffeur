@@ -500,6 +500,31 @@ public actor FileStore {
         snapshot.presetSets.removeAll { $0.value.id == id }
         snapshot.presets.removeAll { $0.value.setID == id }
     }
+    /// Removes one of a Custom team's agent presets. Session launch snapshots are
+    /// self-contained; projects that last used it forget it so their next launch picks another agent.
+    public func delete(preset id: UUID, expectedVersion: String) throws {
+        _ = reload()
+        guard let stored = snapshot.presets.first(where: { $0.value.id == id }) else {
+            throw ChauffeurError("missing_preset", "Agent preset no longer exists")
+        }
+        let url = URL(fileURLWithPath: stored.path)
+        try checkVersion(at: url, expectedVersion: expectedVersion)
+        if let set = snapshot.presetSets.first(where: { $0.value.id == stored.value.setID }) {
+            var revised = set.value; revised.revision = try nextRevision(revised.revision)
+            let savedSet = try write(revised, at: URL(fileURLWithPath: set.path), expectedVersion: set.version)
+            snapshot.presetSets.removeAll { $0.value.id == revised.id }; snapshot.presetSets.append(savedSet)
+        }
+        for project in snapshot.projects where project.value.lastPresetID == id {
+            var value = project.value; value.lastPresetID = nil
+            let saved = try write(value, at: URL(fileURLWithPath: project.path), expectedVersion: project.version)
+            snapshot.projects.removeAll { $0.value.id == value.id }; snapshot.projects.append(saved)
+        }
+        // Recheck after the other writes, as a save does, so a concurrent edit is never silently removed.
+        try checkVersion(at: url, expectedVersion: expectedVersion)
+        try manager.removeItem(at: url)
+        localChanges.insert(url.path)
+        snapshot.presets.removeAll { $0.value.id == id }
+    }
     /// Removes a finished session's record. Liveness is the runtime's decision.
     public func delete(session id: UUID) throws {
         _ = reload()

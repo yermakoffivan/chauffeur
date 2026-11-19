@@ -888,6 +888,10 @@ public actor RuntimeCoordinator {
             let saved = try await store.save(params["record"].decode(AgentPreset.self), expectedVersion: params["version"].string)
             await reconcileSkills()
             return try .from(saved)
+        case "deletePreset":
+            try await store.delete(preset: params.uuid("presetID"), expectedVersion: params.requiredString("version"))
+            await reconcileSkills()
+            return .object(["deleted": .bool(true)])
         case "saveProject":
             var project = try params["record"].decode(Project.self)
             // A project created without naming a team gets the default team.

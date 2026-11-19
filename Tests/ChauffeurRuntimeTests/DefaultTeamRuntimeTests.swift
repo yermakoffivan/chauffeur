@@ -42,6 +42,22 @@ struct DefaultTeamRuntimeTests {
         #expect(after.map { "\($0.name):\($0.isDefault)" } == ["Alpha:true"])
     }
 
+    @Test func deletingACustomTeamAgentRemovesItFromTheTeam() async throws {
+        let root = URL(fileURLWithPath: "/tmp/chauffeur-default-team-\(UUID())").resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = try makeRuntime(root: root)
+        try await runtime.start()
+        var team = PresetSet(name: "Custom"); team.agentSelection = .custom
+        _ = try await runtime.handle(IPCRequest("savePresetSet", params: .object(["record": try .from(team)])))
+        let keep = AgentPreset(setID: team.id, name: "Keep", kind: .claude, executable: "claude", configurationDirectory: "")
+        let duplicate = AgentPreset(setID: team.id, name: "Duplicate", kind: .opencode, executable: "opencode", configurationDirectory: "")
+        for preset in [keep, duplicate] { _ = try await runtime.handle(IPCRequest("savePreset", params: .object(["record": try .from(preset)]))) }
+        let version = await runtime.store.refresh().presets.first { $0.value.id == duplicate.id }!.version
+        _ = try await runtime.handle(IPCRequest("deletePreset", params: .object(["presetID": .string(duplicate.id.uuidString), "version": .string(version)])))
+        let snapshot = await runtime.store.refresh()
+        #expect(snapshot.agents(teamID: team.id, includeArchived: true).map(\.name) == ["Keep"])
+    }
+
     @Test func projectSavedWithAnUnknownTeamGetsTheDefault() async throws {
         let root = URL(fileURLWithPath: "/tmp/chauffeur-default-team-\(UUID())").resolvingSymlinksInPath()
         defer { try? FileManager.default.removeItem(at: root) }

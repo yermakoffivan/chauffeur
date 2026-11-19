@@ -38,6 +38,36 @@ struct MetadataIntegrityTests {
         #expect(try String(contentsOf: profile, encoding: .utf8) == "keep")
     }
 
+    @Test func deletingAnAgentPresetRemovesItFromItsTeamAndKeepsHistory() async throws {
+        let fixture = try await MetadataFixture.make(); defer { fixture.cleanup() }
+        var team = fixture.set; team.agentSelection = .custom
+        let savedTeam = try await fixture.store.save(team, expectedVersion: await fixture.store.reload().presetSets[0].version)
+        let session = try await fixture.store.save(fixture.session())
+        let before = try Data(contentsOf: URL(fileURLWithPath: session.path))
+        var changed = fixture.preset.value; changed.name = "Changed after confirmation"
+        let updated = try await fixture.store.save(changed, expectedVersion: fixture.preset.version)
+        do {
+            try await fixture.store.delete(preset: fixture.preset.value.id, expectedVersion: fixture.preset.version)
+            Issue.record("Deleted a concurrently edited preset")
+        } catch let error as ChauffeurError { #expect(error.code == "edit_conflict") }
+        try await fixture.store.rememberPreset(fixture.preset.value.id, projectID: fixture.project.value.id, setID: team.id)
+        #expect(await fixture.store.reload().projects.first?.value.lastPresetID == fixture.preset.value.id)
+        let revision = try #require(await fixture.store.reload().presetSets.first?.value.revision)
+        try await fixture.store.delete(preset: fixture.preset.value.id, expectedVersion: updated.version)
+        let snapshot = await fixture.store.reload()
+        #expect(snapshot.presets.isEmpty)
+        #expect(snapshot.projects.first?.value.lastPresetID == nil)
+        #expect(snapshot.agents(in: savedTeam.value, includeArchived: true).isEmpty)
+        #expect(snapshot.presetSets.first?.value.revision == revision + 1)
+        #expect(!FileManager.default.fileExists(atPath: updated.path))
+        #expect(snapshot.errors.isEmpty)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: session.path)) == before)
+        do {
+            try await fixture.store.delete(preset: fixture.preset.value.id, expectedVersion: updated.version)
+            Issue.record("Deleted a missing preset")
+        } catch let error as ChauffeurError { #expect(error.code == "missing_preset") }
+    }
+
     @Test func childRecordsMustMatchTheirContainingSetAndProject() async throws {
         let fixture = try await MetadataFixture.make(); defer { fixture.cleanup() }
         let session = try await fixture.store.save(fixture.session())
