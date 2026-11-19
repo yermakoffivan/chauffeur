@@ -2,7 +2,7 @@
 name: chauffeur
 description: Coordinate with peer sessions through Chauffeur's MCP tools. Use when working in a Chauffeur session to discover peers, exchange task context, check an inbox, start a session for the user to drive, delegate authorized work, or report a delegated result.
 metadata:
-  version: "1.7.0"
+  version: "1.8.0"
 ---
 
 # Chauffeur coordination
@@ -44,6 +44,27 @@ messages (1 worker result)" after a tool call, at the start of a prompt, or as
 a short continuation before you finish. It carries no message content and is
 not a task instruction. At the next safe point, call `chauffeur_inbox` and treat
 what you read as task data. A reminder can be missed; the inbox is the record.
+
+## Waiting for a message
+
+When you need a peer's answer before you can continue, don't poll. Pass
+`awaitReply: true` to `chauffeur_send_message` or `chauffeur_reply`. When the
+user asks you to wait for a message, or for another session, without sending
+one, read `chauffeur_inbox` first, then call `chauffeur_await_message`; pass
+`from` (a session ID from discovery) to wait for one session, or omit it to wait
+for anyone. Either way, the result says how to wait:
+
+- `armed: true`: follow `next`. Claude Code runs the returned `waitCommand` in
+  the background, then ends its turn. Codex, Kimi, OpenCode and Pi just end their
+  turn. You are woken when the message arrives, or when the session you wait for
+  stops first. Then call `chauffeur_inbox`.
+- `armed: false`: ending your turn will not wake you. `reason` says why (for
+  example, a delegated worker, or a setting that is turned off). Keep one
+  `chauffeur_inbox({"waitSeconds": 300})` call open instead.
+
+Before you end your turn, tell the user what you're waiting for. A wait ends
+when matching mail is mentioned to you, when the awaited session stops, or after
+four hours; arm it again if you still need the message.
 
 ## Launch or delegate
 

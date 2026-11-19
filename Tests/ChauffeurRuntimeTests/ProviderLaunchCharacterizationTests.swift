@@ -185,6 +185,28 @@ struct ProviderLaunchCharacterizationTests {
         #expect(!(await fixture.runtime.resultWakeApplies(session(.codex, root: root, version: "codex-cli 0.155.1"))))
     }
 
+    @Test func eachProviderIsWokenByAnAwaitedMessageItsOwnWay() async throws {
+        let fixture = try await LaunchFixture.make(); defer { fixture.cleanup() }
+        let root = fixture.root
+        guard case .waitCommand(let command) = await fixture.runtime.messageWake(for: session(.claude, root: root, version: "2.1.278 (Claude Code)")) else {
+            Issue.record("Claude waits with a background command"); return
+        }
+        #expect(command.contains("wait-for-work"))
+        #expect(await fixture.runtime.messageWake(for: session(.codex, root: root, version: "codex-cli 0.155.1")) == .typedPrompt)
+        #expect(await fixture.runtime.messageWake(for: session(.opencode, root: root)) == .plugin)
+        #expect(await fixture.runtime.messageWake(for: session(.pi, root: root)) == .plugin)
+        var worker = session(.claude, root: root, version: "2.1.278 (Claude Code)"); worker.parentID = UUID()
+        #expect(!(await fixture.runtime.messageWake(for: worker).arms), "An idle worker would look finished to its coordinator")
+        var basic = session(.claude, root: root, version: "2.1.278 (Claude Code)"); basic.launch.preset.integration = .unavailable
+        #expect(!(await fixture.runtime.messageWake(for: basic).arms))
+        #expect(!(await fixture.runtime.messageWake(for: session(.codex, root: root, version: "2.1.278 (Claude Code)")).arms))
+        var settings = RetentionSettings(); settings.wakeIdleCoordinators = false
+        _ = try await fixture.runtime.handle(IPCRequest("saveSettings", params: try .from(settings)))
+        let off = await fixture.runtime.messageWake(for: session(.codex, root: root, version: "codex-cli 0.155.1"))
+        #expect(off == .unavailable("Waking idle Codex sessions is turned off in Chauffeur's Settings"))
+        #expect(await fixture.runtime.messageWakeValue(off)["armed"] == .bool(false))
+    }
+
     @Test func composerReadinessTrimsAndIgnoresShells() {
         #expect(TmuxHost.composerReadiness(kind: .codex, activeLine: "  › Ask Codex to do anything  ") == .ready)
         #expect(TmuxHost.composerReadiness(kind: .codex, activeLine: "›") == .inputPending)

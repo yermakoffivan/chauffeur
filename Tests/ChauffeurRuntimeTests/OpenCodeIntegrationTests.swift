@@ -279,6 +279,19 @@ struct OpenCodeHookCommandTests {
         #expect(!(await fixture.runtime.hasOpenWorkers(launched.id)))
         #expect(try hook("Stop", #","stop_hook_active":false"#)?["waitForWorkers"] == .bool(false))
 
+        // A session that asked a peer something waits for the answer the same way. This fixture's
+        // fake OpenCode fails the integration check, so the tool declines and says how to wait instead.
+        let declined = try await fixture.runtime.callTool(token: token, name: "chauffeur_send_message", arguments: .object([
+            "recipientID": .string(peer.id.uuidString), "body": .string("Which port?"), "retryKey": .string("ask"), "awaitReply": .bool(true)]))
+        #expect(declined["id"].string != nil && declined["awaitReply"]["armed"] == .bool(false) && declined["awaitReply"]["reason"].string != nil)
+        #expect(try await !fixture.runtime.ledger.isAwaitingMessage(sessionID: launched.id))
+        #expect(try hook("Stop", #","stop_hook_active":false"#)?["waitForWorkers"] == .bool(false))
+        try await fixture.runtime.ledger.awaitMessage(caller: caller, from: peer.id, until: Date().addingTimeInterval(Ledger.replyWaitLimit))
+        #expect(try hook("Stop", #","stop_hook_active":false"#) == .object(["block": .bool(false), "text": .null, "waitForWorkers": .bool(true)]))
+        _ = try await fixture.runtime.ledger.send(caller: sender, recipientID: launched.id, body: "8080", retryKey: "port")
+        _ = try await fixture.runtime.callTool(token: token, name: "chauffeur_inbox", arguments: .object([:]))
+        #expect(try hook("Stop", #","stop_hook_active":false"#)?["waitForWorkers"] == .bool(false), "Reading the answer ends the wait")
+
         // Claude's output is unchanged by the new field.
         let claude = try run(ctl, ["inbox-hook", "--provider", "claude"], input: #"{"session_id":"\#(conversation)","hook_event_name":"Stop"}"#, environment: environment)
         #expect(claude.status == 0 && claude.output.isEmpty)

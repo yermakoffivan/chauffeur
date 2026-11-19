@@ -69,6 +69,7 @@ public enum DiagnosticTool: String, Codable, Sendable {
     case chauffeur_register_progress, chauffeur_unregister_progress
     case chauffeur_create_worktree, chauffeur_remove_worktree, chauffeur_preview_worktree_removal, chauffeur_launch_session
     case chauffeur_get_checkout_note, chauffeur_set_checkout_note
+    case chauffeur_await_message
 }
 public struct RuntimeLogEntry: Codable, Sendable {
     public var schemaVersion = 1
