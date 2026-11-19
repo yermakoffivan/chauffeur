@@ -319,6 +319,14 @@ public actor RemoteAccessService {
         }
     }
 
+    /// Whether a connected phone shows this session and can ask the user to let its agent remove
+    /// its own worktree. A phone that only lists the session, or an older build, doesn't count.
+    func canAskAboutWorktreeRemoval(sessionID: UUID) async -> Bool {
+        let authenticated = connections.filter { connectionDevices[$0.key] != nil }.map(\.value)
+        for connection in authenticated where await connection.asksAboutWorktreeRemoval(sessionID: sessionID) { return true }
+        return false
+    }
+
     private func broadcast(_ event: RemoteEvent) {
         for (id, connection) in connections where connectionDevices[id] != nil {
             Task { await connection.sendEvent(event) }

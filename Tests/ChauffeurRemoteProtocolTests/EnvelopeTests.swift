@@ -46,7 +46,8 @@ struct EnvelopeTests {
             .stopSession(StopSessionRequest(sessionID: UUID(), force: true)),
             .getSuspendPlan(SuspendPlanRequest(projectID: UUID())),
             .suspendProject(SuspendProjectRequest(projectID: UUID(), interruptBusy: true)),
-            .restoreProject(RestoreProjectRequest(projectID: UUID(), sessionIDs: [UUID()], shownSessionIDs: [UUID(), UUID()]))
+            .restoreProject(RestoreProjectRequest(projectID: UUID(), sessionIDs: [UUID()], shownSessionIDs: [UUID(), UUID()])),
+            .answerWorktreeRemoval(AnswerWorktreeRemovalRequest(requestID: UUID(), approve: true))
         ]
     }
 
@@ -121,7 +122,7 @@ struct EnvelopeTests {
             "hello", "pair", "listInventory", "listWorktreeBranches", "previewWorktreeDestination", "launch",
             "getOperationStatus", "attachTerminal", "terminalResize", "detachTerminal", "getKeepAwake",
             "setKeepAwakeSettings", "setKeepAwakeTimer", "resolveTicket", "createGroup", "stopSession",
-            "getSuspendPlan", "suspendProject", "restoreProject"
+            "getSuspendPlan", "suspendProject", "restoreProject", "answerWorktreeRemoval"
         ]
     ))
     func remoteOperationKindStrings(operation: RemoteOperation, expectedKind: String) throws {

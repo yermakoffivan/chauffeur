@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import ChauffeurCore
+import ChauffeurRemoteProtocol
 
 /// Asks the user before an agent ends its own session to remove the worktree it
 /// works in, so the session and its checkout don't vanish unexplained. One owner

@@ -193,6 +193,11 @@ public actor RemoteOperationHandlers {
                     RemoteRestoreResult.Failure(sessionID: $0.sessionID, title: $0.title, message: $0.message)
                 })))
             } catch { return .failure(Self.remoteError(error)) }
+        case .answerWorktreeRemoval(let request):
+            do {
+                _ = try await runtime.handle(IPCRequest("answerWorktreeRemoval", params: .object(["requestID": .string(request.requestID.uuidString), "approve": .bool(request.approve)])))
+                return .success(.ack)
+            } catch { return .failure(Self.remoteError(error)) }
         case .launch(let request):
             return .success(.operation(await launch(request, deviceID: deviceID)))
         case .getOperationStatus(let request):

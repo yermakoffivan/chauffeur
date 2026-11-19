@@ -74,6 +74,12 @@ actor RemoteClientConnection: RemoteConnectionHandle {
         }
     }
 
+    /// True when this client shows the session's terminal and can ask the user to let its agent
+    /// remove its own worktree.
+    func asksAboutWorktreeRemoval(sessionID: UUID) -> Bool {
+        !closed && deviceID != nil && attachments[sessionID] != nil && clientCapabilities.contains(RemoteProtocol.worktreeRemovalPrompt)
+    }
+
     /// Tells the peer its device was unpaired, then closes.
     func revoke() async {
         guard !closed else { return }
@@ -162,7 +168,7 @@ actor RemoteClientConnection: RemoteConnectionHandle {
             result = await self.detach(detach)
         case .listInventory, .listWorktreeBranches, .getSessionProgress, .previewWorktreeDestination, .launch, .getOperationStatus,
              .getKeepAwake, .setKeepAwakeSettings, .setKeepAwakeTimer, .uploadFileChunk, .resolveTicket, .createGroup, .stopSession,
-             .listSessionDocuments, .readDocument, .readDocumentChunk, .getSuspendPlan, .suspendProject, .restoreProject:
+             .listSessionDocuments, .readDocument, .readDocumentChunk, .getSuspendPlan, .suspendProject, .restoreProject, .answerWorktreeRemoval:
             result = await dispatcher.handle(request.operation, deviceID: deviceID)
         }
         let capabilities = clientCapabilities

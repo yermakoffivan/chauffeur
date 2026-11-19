@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import ChauffeurCore
+import ChauffeurRemoteProtocol
 @testable import ChauffeurRuntimeKit
 
 struct WorktreeToolTests {
@@ -244,6 +245,24 @@ struct WorktreeToolTests {
         #expect(try await removalRequests(runtime).isEmpty)
         try await waitUntil { await runtime.store.reload().worktrees.first { $0.value.id.uuidString == setup.worktreeID.string }?.value.registered == false }
         #expect(!FileManager.default.fileExists(atPath: setup.path))
+    }
+
+    @Test func aPhoneSeesTheRequestInItsInventoryAndAnswersIt() async throws {
+        let setup = try await SelfRemovalFixture.make(branch: "tool/phone"); defer { setup.cleanup() }
+        let runtime = setup.fixture.runtime
+        await runtime.snapshotSubscriberConnected()
+        let confirmation = try #require(try await setup.call("chauffeur_preview_worktree_removal", [:])["confirmation"].string)
+        _ = try await setup.call("chauffeur_remove_worktree", ["confirmation": .string(confirmation)])
+        let handlers = RemoteOperationHandlers(runtime: runtime, root: setup.checkouts.appendingPathComponent("remote"), hostName: "Test Mac")
+
+        let request = try #require(try await handlers.inventory().worktreeRemovalRequests?.first)
+        #expect(request.sessionID == setup.worker.id && request.path == setup.path && request.branch == "tool/phone")
+        let answered = await handlers.handle(.answerWorktreeRemoval(AnswerWorktreeRemovalRequest(requestID: request.id, approve: false)), deviceID: UUID())
+        #expect(answered == .success(.ack))
+        #expect(try await handlers.inventory().worktreeRemovalRequests == [])
+        try await Task.sleep(for: RuntimeCoordinator.ownWorktreeRemovalDelay + .milliseconds(500))
+        #expect(FileManager.default.fileExists(atPath: setup.path))
+        #expect(await runtime.store.reload().sessions.first { $0.value.id == setup.worker.id }?.value.state.isLive == true)
     }
 
     private func removalRequests(_ runtime: RuntimeCoordinator) async throws -> [WorktreeRemovalRequest] {

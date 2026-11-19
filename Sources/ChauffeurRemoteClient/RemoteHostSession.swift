@@ -157,6 +157,11 @@ public final class RemoteHostSession {
         return host.capabilities.contains(RemoteProtocol.projectSuspension)
     }
 
+    public var isWorktreeRemovalPromptSupported: Bool {
+        guard case .connected(let host) = connectionState else { return false }
+        return host.capabilities.contains(RemoteProtocol.worktreeRemovalPrompt)
+    }
+
     @ObservationIgnored private let journal: any PendingOperationJournal
     @ObservationIgnored private let clientName: String
     @ObservationIgnored private let clientVersion: String
@@ -500,6 +505,23 @@ public final class RemoteHostSession {
             throw RemoteClientError.invalidResponse("stopSession returned \(result.kind)")
         }
         await refreshInventory()
+    }
+
+    /// Approves or declines an agent removing its own worktree, then refreshes the inventory so the
+    /// request leaves the list. It is refreshed after a failure too: the Mac drops a request it
+    /// could not carry out, keeping the session running.
+    public func answerWorktreeRemoval(_ requestID: UUID, approve: Bool) async throws {
+        guard isWorktreeRemovalPromptSupported else {
+            throw RemoteClientError.invalidResponse("Update Chauffeur on the Mac to answer this from your phone.")
+        }
+        guard let connection else { throw RemoteClientError.disconnected }
+        let result: RemoteResult
+        do { result = try await connection.request(.answerWorktreeRemoval(AnswerWorktreeRemovalRequest(requestID: requestID, approve: approve))) }
+        catch { await refreshInventory(); throw error }
+        await refreshInventory()
+        guard case .ack = result else {
+            throw RemoteClientError.invalidResponse("answerWorktreeRemoval returned \(result.kind)")
+        }
     }
 
     public func setKeepAwakeSettings(_ settings: KeepAwakeSettings) async throws {

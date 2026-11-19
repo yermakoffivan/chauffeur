@@ -226,6 +226,7 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
     case getSuspendPlan(SuspendPlanRequest)
     case suspendProject(SuspendProjectRequest)
     case restoreProject(RestoreProjectRequest)
+    case answerWorktreeRemoval(AnswerWorktreeRemovalRequest)
 
     public var kind: String {
         switch self {
@@ -253,6 +254,7 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
         case .getSuspendPlan: return "getSuspendPlan"
         case .suspendProject: return "suspendProject"
         case .restoreProject: return "restoreProject"
+        case .answerWorktreeRemoval: return "answerWorktreeRemoval"
         }
     }
 
@@ -308,6 +310,8 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
             self = .suspendProject(try container.decode(SuspendProjectRequest.self, forKey: .payload))
         case "restoreProject":
             self = .restoreProject(try container.decode(RestoreProjectRequest.self, forKey: .payload))
+        case "answerWorktreeRemoval":
+            self = .answerWorktreeRemoval(try container.decode(AnswerWorktreeRemovalRequest.self, forKey: .payload))
         default:
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
@@ -369,6 +373,8 @@ public enum RemoteOperation: Equatable, Sendable, Codable {
         case .suspendProject(let payload):
             try container.encode(payload, forKey: .payload)
         case .restoreProject(let payload):
+            try container.encode(payload, forKey: .payload)
+        case .answerWorktreeRemoval(let payload):
             try container.encode(payload, forKey: .payload)
         }
     }

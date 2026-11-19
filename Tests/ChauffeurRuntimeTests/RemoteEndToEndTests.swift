@@ -131,6 +131,44 @@ struct RemoteEndToEndTests {
         await fixture.teardown()
     }
 
+    /// With the Mac app closed, a phone showing the session is who the runtime asks before an agent
+    /// removes its own worktree; once the phone stops showing it, the removal goes ahead unasked.
+    @Test func aPhoneShowingTheSessionIsAskedBeforeItsAgentRemovesItsWorktree() async throws {
+        let fixture = try await EndToEndFixture.make(); defer { fixture.cleanup() }
+        await fixture.runtime.attachRemoteAccess(fixture.service)
+        let host = try await fixture.pair()
+        let phone = try await fixture.connectedSession(host)
+        let shown = try #require(try await phone.launch(fixture.shellLaunch(key: UUID(), branch: "e2e-shown")).sessionID)
+        let other = try #require(try await phone.launch(fixture.shellLaunch(key: UUID(), branch: "e2e-other")).sessionID)
+        let token = try await fixture.runtime.ledger.issueGrant(sessionID: shown)
+        func call(_ name: String, _ arguments: [String: JSONValue] = [:]) async throws -> JSONValue {
+            try await fixture.runtime.callTool(token: token, name: name, arguments: .object(arguments))
+        }
+
+        let terminal = try phone.makeTerminal(sessionID: shown, adapter: FakeTerminalEngineAdapter())
+        await terminal.attach(takeControl: false)
+        guard case .attached = terminal.state else { Issue.record("attach failed: \(terminal.state)"); return }
+        #expect(await fixture.service.canAskAboutWorktreeRemoval(sessionID: shown))
+        #expect(await !fixture.service.canAskAboutWorktreeRemoval(sessionID: other))
+
+        let confirmation = try #require(try await call("chauffeur_preview_worktree_removal")["confirmation"].string)
+        let asked = try await call("chauffeur_remove_worktree", ["confirmation": .string(confirmation)])
+        #expect(asked["awaitingUser"] == .bool(true))
+        try await eventually { phone.inventory?.worktreeRemovalRequests?.first?.sessionID == shown }
+        let request = try #require(phone.inventory?.worktreeRemovalRequests?.first)
+        try await phone.answerWorktreeRemoval(request.id, approve: false)
+        #expect(phone.inventory?.worktreeRemovalRequests == [])
+        #expect(await fixture.runtime.store.reload().sessions.first { $0.value.id == shown }?.value.state.isLive == true)
+
+        await terminal.detach()
+        try await eventually { await !fixture.service.canAskAboutWorktreeRemoval(sessionID: shown) }
+        let unasked = try await call("chauffeur_remove_worktree", ["confirmation": .string(confirmation)])
+        #expect(unasked["scheduled"] == .bool(true) && unasked["awaitingUser"] == .null)
+        try await eventually { await fixture.runtime.store.reload().sessions.first { $0.value.id == shown }?.value.state.isLive == false }
+        phone.disconnect()
+        await fixture.teardown()
+    }
+
     @Test func unauthorizedAndRevoked() async throws {
         let fixture = try await EndToEndFixture.make(); defer { fixture.cleanup() }
         // A made-up device on the right key is refused at hello.

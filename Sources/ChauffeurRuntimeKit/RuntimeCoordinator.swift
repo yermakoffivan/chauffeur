@@ -1495,8 +1495,8 @@ public actor RuntimeCoordinator {
             guard let session = sessions[caller.sessionID], session.parentID == nil else {
                 throw ChauffeurError("delegated_worker", "Delegated workers can't remove their own worktree. Report your result; your coordinator removes it after closing you")
             }
-            // With no app connected there is nobody to ask, so the removal goes ahead.
-            if settings.confirmOwnWorktreeRemoval && snapshotSubscribers > 0 {
+            // With neither the app open nor a phone showing the session there is nobody to ask, so the removal goes ahead.
+            if settings.confirmOwnWorktreeRemoval, await canAskAboutWorktreeRemoval(sessionID: session.id) {
                 let request = WorktreeRemovalRequest(sessionID: session.id, sessionTitle: session.title, worktreeID: worktreeID, path: stored.value.path,
                                                      branch: check.entry.branch.isEmpty ? nil : check.entry.branch, branchOutcome: Self.userBranchOutcome(check),
                                                      lost: check.preview.items(branch: check.entry.branch, finishedSessions: 0, checkoutMissing: false, deletingBranch: check.deletesBranch)
@@ -1507,6 +1507,8 @@ public actor RuntimeCoordinator {
                 return .object(result.merging(["removed": .bool(false), "scheduled": .bool(false), "awaitingUser": .bool(true), "endsYourSession": .bool(true),
                                                "message": .string("Chauffeur is asking the user to confirm. If they approve, your session ends and the worktree is removed; if they decline, you keep running and the worktree stays. You are not told the answer. Finish talking to the user now and start no further work until they answer.")]) { $1 })
             }
+            // Asking who can answer awaited, so another call may have started removing it meanwhile.
+            guard !worktreesPendingRemoval.contains(worktreeID) else { throw ChauffeurError("worktree_busy", "This worktree is already being removed") }
             worktreesPendingRemoval.insert(worktreeID)
             let confirmation = check.confirmation
             Task { await self.finishOwnWorktreeRemoval(sessionID: caller.sessionID, worktreeID: worktreeID, branchRemoval: branchRemoval, discardChanges: discardChanges, confirmation: confirmation) }
@@ -1545,6 +1547,11 @@ public actor RuntimeCoordinator {
             worktreeRemovalRequests.removeValue(forKey: sessionID)
         }
         return worktreeRemovalRequests.values.map(\.request).sorted { $0.requestedAt < $1.requestedAt }
+    }
+
+    private func canAskAboutWorktreeRemoval(sessionID: UUID) async -> Bool {
+        if snapshotSubscribers > 0 { return true }
+        return await remoteAccess?.canAskAboutWorktreeRemoval(sessionID: sessionID) ?? false
     }
 
     func snapshotSubscriberConnected() { snapshotSubscribers += 1 }

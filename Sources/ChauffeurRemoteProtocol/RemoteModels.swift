@@ -319,6 +319,9 @@ public struct InventorySnapshot: Codable, Equatable, Sendable {
     public var sessions: [SessionSummary]
     public var generatedAt: Date
     public var keepAwake: KeepAwakeStatus?
+    /// Agents waiting for the user to let them remove their own worktree, oldest first.
+    /// Absent from Macs without `worktreeRemovalPrompt`.
+    public var worktreeRemovalRequests: [WorktreeRemovalRequest]?
 
     public init(
         revision: UInt64,
@@ -326,7 +329,8 @@ public struct InventorySnapshot: Codable, Equatable, Sendable {
         projects: [ProjectSummary] = [],
         sessions: [SessionSummary] = [],
         generatedAt: Date,
-        keepAwake: KeepAwakeStatus? = nil
+        keepAwake: KeepAwakeStatus? = nil,
+        worktreeRemovalRequests: [WorktreeRemovalRequest]? = nil
     ) {
         self.revision = revision
         self.hostName = hostName
@@ -334,6 +338,7 @@ public struct InventorySnapshot: Codable, Equatable, Sendable {
         self.sessions = sessions
         self.generatedAt = generatedAt
         self.keepAwake = keepAwake
+        self.worktreeRemovalRequests = worktreeRemovalRequests
     }
 }
 
@@ -352,6 +357,7 @@ public extension InventorySnapshot {
             }
         }
         if !capabilities.contains(RemoteProtocol.keepAwake) { result.keepAwake = nil }
+        if !capabilities.contains(RemoteProtocol.worktreeRemovalPrompt) { result.worktreeRemovalRequests = nil }
         return result
     }
 }

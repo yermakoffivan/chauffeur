@@ -5,7 +5,7 @@ public enum RemoteProtocol {
     /// The runtime's main port in Release and Debug builds; pairing listens on the next port.
     public static let releasePort = 51847
     public static let debugPort = 51848
-    public static let capabilities = ["terminal.binary.v1", "launch.worktree.v1", "inventory.v1", "progress.v1", "worktree.branches.v1", openSessionKinds, keepAwake, fileUpload, ticketResolution, launchCoordination, groupCreation, sessionStop, documents, documentChunks, projectSuspension]
+    public static let capabilities = ["terminal.binary.v1", "launch.worktree.v1", "inventory.v1", "progress.v1", "worktree.branches.v1", openSessionKinds, keepAwake, fileUpload, ticketResolution, launchCoordination, groupCreation, sessionStop, documents, documentChunks, projectSuspension, worktreeRemovalPrompt]
     /// A client with this capability decodes any session kind (an unknown one as `agent`). Builds without it fail to
     /// decode a whole inventory that names a kind they don't know, so the Mac sends them `shell` instead.
     public static let openSessionKinds = "sessionKinds.open.v1"
@@ -26,6 +26,10 @@ public enum RemoteProtocol {
     public static let documentChunks = "documents.chunks.v1"
     /// The Mac accepts `getSuspendPlan`, `suspendProject` and `restoreProject`, and reports `SessionSummary.suspendedAt`.
     public static let projectSuspension = "project.suspend.v1"
+    /// Host: the inventory lists `worktreeRemovalRequests` and the Mac accepts `answerWorktreeRemoval`.
+    /// Client: it asks the user about them, so an agent removing the worktree of a session the client
+    /// shows waits for an answer instead of ending at once.
+    public static let worktreeRemovalPrompt = "worktree.removal.confirm.v1"
     /// The kinds every client decodes, including those without `openSessionKinds`.
     public static let legacySessionKinds: Set<RemoteSessionKind> = [.codex, .claude, .shell]
 }

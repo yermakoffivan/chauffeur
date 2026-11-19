@@ -34,6 +34,7 @@ extension ChauffeurMobileApp {
         if CommandLine.arguments.contains("--preview-fixture") {
             let model = MobileAppModel.preview()
             if CommandLine.arguments.contains("--preview-location") { model.path.append(.newSession) }
+            if CommandLine.arguments.contains("--preview-worktree-removal") { model.addPreviewWorktreeRemovalRequest() }
             return model
         }
         #endif
@@ -43,6 +44,7 @@ extension ChauffeurMobileApp {
 
 struct RootView: View {
     @Bindable var model: MobileAppModel
+    @State private var worktreeRemovals = WorktreeRemovalPrompt()
 
     var body: some View {
         NavigationStack(path: $model.path) {
@@ -84,6 +86,9 @@ struct RootView: View {
         }
         // Session links (`chauffeur://session/<project>/<session>`) from other apps.
         .onOpenURL { model.openSessionURL($0) }
+        .onChange(of: model.worktreeRemovalRequests, initial: true) { _, requests in
+            worktreeRemovals.update(requests, model: model)
+        }
     }
 }
 

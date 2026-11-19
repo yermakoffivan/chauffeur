@@ -668,6 +668,23 @@ final class MobileAppModel {
         }
     }
 
+    // MARK: - Worktree removal requests
+
+    /// Agents waiting for the user to let them remove their own worktree. Empty while the inventory
+    /// may be out of date, so a request answered elsewhere or already gone isn't asked about.
+    var worktreeRemovalRequests: [WorktreeRemovalRequest] {
+        guard isConnected, !inventoryIsStale else { return [] }
+        return inventory?.worktreeRemovalRequests ?? []
+    }
+
+    func answerWorktreeRemoval(_ request: WorktreeRemovalRequest, approve: Bool) async throws {
+        guard let session else {
+            if previewInventory != nil { return }
+            throw RemoteClientError.disconnected
+        }
+        try await session.answerWorktreeRemoval(request.id, approve: approve)
+    }
+
     // MARK: - Lookups
 
     /// Sessions the runtime reports as live, including ones waiting for input.
@@ -824,6 +841,17 @@ final class MobileAppModel {
         model.openTabs = sessions.prefix(2).map(\.id)
         model.selectedTab = model.openTabs.first
         return model
+    }
+
+    /// Lists an agent asking to remove its own worktree, for checking the prompt without a Mac.
+    func addPreviewWorktreeRemovalRequest() {
+        guard var inventory = previewInventory, let session = inventory.sessions.first(where: { $0.worktreeID != nil && $0.state.isLive }) else { return }
+        inventory.worktreeRemovalRequests = [WorktreeRemovalRequest(
+            sessionID: session.id, sessionTitle: session.title, worktreeID: session.worktreeID!, path: session.checkoutPath, branch: session.branch,
+            branchOutcome: session.branch.map { "Branch \($0) is kept, unless another local branch holds its commits." },
+            lost: ["2 uncommitted files", "1 commit not pushed"]
+        )]
+        previewInventory = inventory
     }
 
     static func fixtureHost() -> SavedHost {

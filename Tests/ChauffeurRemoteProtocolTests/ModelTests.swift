@@ -51,6 +51,22 @@ struct ModelTests {
         #expect(try RemoteJSON.decode(InventorySnapshot.self, from: oldJSON).keepAwake == nil)
     }
 
+    @Test func worktreeRemovalRequestsAreCapabilityGatedAndOptionalFromOlderMacs() throws {
+        let request = WorktreeRemovalRequest(sessionID: UUID(), sessionTitle: "Agent", worktreeID: UUID(), path: "/repo/.worktrees/a", branch: "a",
+                                             branchOutcome: "Branch a is kept.", lost: ["1 commit not pushed"], requestedAt: Date(timeIntervalSince1970: 10))
+        let inventory = InventorySnapshot(revision: 1, hostName: "Mac", generatedAt: Date(timeIntervalSince1970: 4_000), worktreeRemovalRequests: [request])
+
+        #expect(RemoteProtocol.capabilities.contains(RemoteProtocol.worktreeRemovalPrompt))
+        #expect(try RemoteJSON.decode(InventorySnapshot.self, from: RemoteJSON.encode(inventory)) == inventory)
+        #expect(inventory.compatible(withClientCapabilities: RemoteProtocol.capabilities).worktreeRemovalRequests == [request])
+        let legacy = inventory.compatible(withClientCapabilities: ["inventory.v1"])
+        #expect(legacy.worktreeRemovalRequests == nil)
+        #expect(!String(decoding: try RemoteJSON.encode(legacy), as: UTF8.self).contains("worktreeRemovalRequests"))
+
+        let oldJSON = Data(#"{"revision":1,"hostName":"Mac","projects":[],"sessions":[],"generatedAt":"1970-01-01T01:06:40Z"}"#.utf8)
+        #expect(try RemoteJSON.decode(InventorySnapshot.self, from: oldJSON).worktreeRemovalRequests == nil)
+    }
+
     @Test func progressIsOptionalForOlderInventoriesAndRoundTripsSeparately() throws {
         let session = SessionSummary(id: UUID(), projectID: UUID(), folderID: UUID(), title: "Task", kind: .codex, state: .running, checkoutPath: "/repo", createdAt: Date(timeIntervalSince1970: 0), updatedAt: Date(timeIntervalSince1970: 0))
         let legacy = try RemoteJSON.encode(session)
