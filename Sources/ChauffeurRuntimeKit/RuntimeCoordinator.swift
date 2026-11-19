@@ -2101,15 +2101,17 @@ public actor RuntimeCoordinator {
         guard restartingSessions.insert(sessionID).inserted else { throw ChauffeurError("restart_pending", "This session is already restarting") }
         defer { restartingSessions.remove(sessionID); interruptedRestarts.remove(sessionID) }
         let kind = session.launch.preset.kind
-        guard kind.supportsSuspension else { throw ChauffeurError("restart_unavailable", "\(kind.displayName) sessions can't be restarted yet") }
+        guard kind.isAgent else { throw ChauffeurError("restart_unavailable", "Only agent sessions can be restarted") }
         guard session.parentID == nil else { throw ChauffeurError("restart_unavailable", "Delegated workers can't be restarted. Ask their coordinator to replace them instead") }
         guard session.closureOutcome == nil else { throw ChauffeurError("restart_unavailable", "This delegated attempt is closed") }
         guard let conversation = session.nativeConversationID else { throw ChauffeurError("restart_unavailable", "Chauffeur doesn't know this session's conversation yet, so it couldn't resume it. Send the agent a message first") }
         guard !isSuspended(session.projectID) else { throw ChauffeurError("project_suspended", "This project is suspended. Restore it first") }
         guard session.worktreeID.map(worktreesPendingRemoval.contains) != true else { throw ChauffeurError("worktree_busy", "This session's worktree is being removed") }
         guard !launching.contains(sessionID), !stopRequests.contains(sessionID) else { throw ChauffeurError("restart_pending", "This session is already starting or stopping") }
+        // Chauffeur reads Claude Code and Codex transcripts; other agents resume the conversation they reported.
         let configuration = Paths.canonical(session.launch.configurationPath), checkout = session.launch.workingDirectory
-        let saved = await Task.detached { RecentConversationScanner.hasTranscript(kind: kind, id: conversation, checkout: checkout, configuration: configuration) }.value
+        var saved = true
+        if kind.supportsSuspension { saved = await Task.detached { RecentConversationScanner.hasTranscript(kind: kind, id: conversation, checkout: checkout, configuration: configuration) }.value }
         guard saved else { throw ChauffeurError("restart_unavailable", "Chauffeur can't find this conversation's saved transcript, so restarting could lose it") }
         try await resumePreflight(session)
         // The checks awaited: a stop, a close or another conversation since means there is nothing to restart.

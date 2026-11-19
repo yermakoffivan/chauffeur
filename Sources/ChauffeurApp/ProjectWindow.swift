@@ -87,6 +87,18 @@ extension UTType {
 
 /// Accepts sidebar drags on a row. Where the pointer sits on the row picks
 /// the destination, shown as a line above or below it, or an outline for into.
+/// Confirms restarting a running agent: it quits, interrupting any turn, and resumes its conversation.
+private struct RestartSessionConfirmation: ViewModifier {
+    @Binding var session: Session?
+    let restart: (Session) -> Void
+    func body(content: Content) -> some View {
+        content.confirmationDialog("Restart \(session?.title ?? "session")?", isPresented: Binding(get: { session != nil }, set: { if !$0 { session = nil } }), titleVisibility: .visible) {
+            Button("Restart Session") { if let session { restart(session) }; session = nil }
+            Button("Cancel", role: .cancel) { session = nil }
+        } message: { Text("The agent quits and resumes the same conversation, picking up an updated CLI and Chauffeur's tools. A turn in progress is interrupted.") }
+    }
+}
+
 private struct SidebarDropModifier: ViewModifier {
     /// The destination for a pointer at a fraction of the row's height.
     let destination: (CGFloat) -> RepositoryDestination
@@ -212,6 +224,7 @@ private struct ProjectWindowContent: View, Equatable {
     @State private var checkingTab = false
     @State private var tabError: String?
     @State private var deletingSession: Session?
+    @State private var restartingSession: Session?
     @State private var clearingFinished: [Session]?
     @State private var recentConversationsRow: CheckoutRow?
     @State private var editingNote: CheckoutRow?
@@ -295,6 +308,7 @@ private struct ProjectWindowContent: View, Equatable {
                     Button("Delete Finished Session", role: .destructive) { if let session = deletingSession { deleteSession(session) }; deletingSession = nil }
                     Button("Cancel", role: .cancel) { deletingSession = nil }
                 } message: { Text("Permanently deletes this session and its saved terminal history.") }
+                .modifier(RestartSessionConfirmation(session: $restartingSession, restart: restartSession))
                 .confirmationDialog(clearFinishedTitle, isPresented: clearingFinishedPresented, titleVisibility: .visible) {
                     Button("Clear Finished Sessions", role: .destructive, action: clearFinished)
                     Button("Cancel", role: .cancel) { clearingFinished = nil }
@@ -965,6 +979,7 @@ private struct ProjectWindowContent: View, Equatable {
             .contextMenu {
                 Button("Session Details") { selectSession(session.id); layout.detailsVisible = true }
                 Button("Rename…") { beginRename(session) }.disabled(!online)
+                if session.canRestartConversation { Button("Restart Session…") { restartingSession = session }.disabled(!online) }
                 if session.state.isLive { Button("Stop Session…") { selectSession(session.id); layout.detailsVisible = true } }
                 else if session.suspendedAt == nil { Button("Delete Finished Session…", role: .destructive) { deletingSession = session }.disabled(!online) }
             }
@@ -1048,7 +1063,7 @@ private struct ProjectWindowContent: View, Equatable {
                     if !sessions.isEmpty || !pending.isEmpty {
                         SessionStrip(pendingTabs: pending, selectPending: { layout.state.selectedSessionID = $0 }, sessions: sessions, project: project, keepFinishedSessions: projectModel.slice.keepFinishedSessions, close: { requestCloseTab($0) }, move: { source, target in
                             layout.state.sessionTabOrder = WorktreeSessions.movingTab(source, to: target, displayed: sessions.map(\.id), savedOrder: layout.state.sessionTabOrder)
-                        }, delete: { deletingSession = $0 }, rename: { beginRename($0) }, selectedID: selectedID, select: { selectSession($0.id) }, details: { selectSession($0.id); layout.detailsVisible = true }, revealPath: { FilePanels.reveal($0.launch.workingDirectory) })
+                        }, delete: { deletingSession = $0 }, restart: { restartingSession = $0 }, rename: { beginRename($0) }, selectedID: selectedID, select: { selectSession($0.id) }, details: { selectSession($0.id); layout.detailsVisible = true }, revealPath: { FilePanels.reveal($0.launch.workingDirectory) })
                         Divider()
                     }
                     if let selectedPending {
@@ -1216,6 +1231,10 @@ private struct ProjectWindowContent: View, Equatable {
     }
     private func deleteSession(_ session: Session) {
         finishTab(session, method: "deleteSession")
+    }
+    /// The agent gets a few seconds to quit before resuming, so the call waits longer than usual.
+    private func restartSession(_ session: Session) {
+        model.perform { _ = try await model.call("restartSession", .object(["sessionID": .string(session.id.uuidString)]), responseTimeout: 90) }
     }
     private func finishTab(_ session: Session, method: String) {
         guard !checkingTab, online else { return }
@@ -1608,6 +1627,7 @@ private struct SessionStrip: View {
     let close: (Session) -> Void
     let move: (UUID, UUID) -> Void
     let delete: (Session) -> Void
+    let restart: (Session) -> Void
     let rename: (Session) -> Void
     let selectedID: UUID?
     let select: (Session) -> Void
@@ -1751,6 +1771,7 @@ private struct SessionStrip: View {
             .contextMenu {
                 Button("Session Details") { details(session) }
                 Button("Rename…") { rename(session) }
+                if session.canRestartConversation { Button("Restart Session…") { restart(session) } }
                 if session.state.isLive { Button("Stop Session…") { details(session) } }
                 else { Button("Delete Finished Session…", role: .destructive) { delete(session) } }
                 Button("Reveal in Finder") { revealPath(session) }

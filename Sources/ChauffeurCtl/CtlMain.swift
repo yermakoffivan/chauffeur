@@ -141,7 +141,7 @@ import ChauffeurCore
     }
     /// Run in the background by a coordinator that ended its turn: exits when the
     /// session has a worker result, message, worker state change or progress milestone,
-    /// printing what to act on. 0 = work or timeout, 2 = replaced or ended, 1 = error.
+    /// printing what to act on. 0 = work, timeout or replaced, 2 = ended, 1 = error.
     /// With --json (the OpenCode plugin), every outcome is one `{"reason","text"}` line;
     /// failures report `ended`, since the plugin acts only on `work`. The plugin prompts on every report, so mail
     /// already mentioned to the session (by a hook or an earlier wait) doesn't end a `--json` wait.
@@ -174,7 +174,8 @@ import ChauffeurCore
             let result = try await RuntimeClient.call(IPCRequest("waitForWork", params: params), socketPath: socket, responseTimeout: minutes * 60 + 60)
             let report = try result.decode(WorkReport.self)
             print(json ? WorkReportFormatter.json(report) : WorkReportFormatter.text(report))
-            return [.replaced, .ended].contains(report.reason) ? 2 : 0
+            // A replaced wait has nothing to report and isn't a failure: Claude Code shows any other status as one.
+            return report.reason == .ended ? 2 : 0
         } catch let error as ChauffeurError where error.code == "socket_failed" || error.code == "connection_closed" || error.code == "service_unavailable" {
             return fail("Chauffeur: cannot reach the Chauffeur service from this shell. A sandbox may block it; wait with chauffeur_inbox instead.")
         } catch {

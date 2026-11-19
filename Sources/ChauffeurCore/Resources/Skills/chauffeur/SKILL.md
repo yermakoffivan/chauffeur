@@ -2,7 +2,7 @@
 name: chauffeur
 description: Coordinate with peer sessions through Chauffeur's MCP tools. Use when working in a Chauffeur session to discover peers, exchange task context, check an inbox, start a session for the user to drive, delegate authorized work, or report a delegated result.
 metadata:
-  version: "1.8.0"
+  version: "1.8.1"
 ---
 
 # Chauffeur coordination
@@ -63,8 +63,10 @@ for anyone. Either way, the result says how to wait:
   `chauffeur_inbox({"waitSeconds": 300})` call open instead.
 
 Before you end your turn, tell the user what you're waiting for. A wait ends
-when matching mail is mentioned to you, when the awaited session stops, or after
-four hours; arm it again if you still need the message.
+when matching mail that arrived after you armed it is mentioned to you, when the
+awaited session stops, or after four hours. Mail already in your inbox doesn't
+end it. To keep watching your inbox, call `chauffeur_await_message` again after
+handling each message, before you end your turn.
 
 ## Launch or delegate
 

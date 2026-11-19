@@ -113,6 +113,19 @@ struct RemoteProjectSuspensionTests {
         _ = try await fixture.stop()
     }
 
+    @Test func anyAgentWithARecordedConversationCanRestartButAWorkerCannot() {
+        let set = PresetSet(name: "Fixture")
+        let preset = AgentPreset(setID: set.id, name: "OpenCode", kind: .opencode, executable: "/bin/cat", configurationDirectory: "/tmp")
+        let launch = LaunchSnapshot(preset: preset, set: set, executablePath: "/bin/cat", executableVersion: "fixture", workingDirectory: "/tmp", additionalPaths: [])
+        var session = Session(projectID: UUID(), groupID: UUID(), title: "OpenCode", launch: launch, folderID: UUID())
+        session.state = .turnFinished
+        #expect(!session.canRestartConversation, "Nothing to resume yet")
+        session.nativeConversationID = "ses_fixture"
+        #expect(session.canRestartConversation)
+        session.parentID = UUID()
+        #expect(!session.canRestartConversation, "Its coordinator replaces a worker instead")
+    }
+
     @Test func aRestartThatCouldNotResumeLeavesTheAgentRunning() async throws {
         let fixture = try await LaunchFixture.make(); defer { fixture.cleanup() }
         let handlers = RemoteOperationHandlers(runtime: fixture.runtime, root: fixture.root, hostName: "Fixture", isAttached: { _ in false })

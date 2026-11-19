@@ -123,9 +123,9 @@ public extension Session {
     var canResumeConversation: Bool {
         !state.isLive && launch.preset.kind.isAgent && nativeConversationID != nil && closureOutcome == nil
     }
-    /// A running agent that Restart can quit and resume in the same conversation: one whose
-    /// conversation suspension can resume too. Delegated workers are left to their coordinator.
+    /// A running agent that Restart can quit and resume in its recorded conversation.
+    /// Delegated workers are left to their coordinator.
     var canRestartConversation: Bool {
-        state.isLive && launch.preset.kind.supportsSuspension && nativeConversationID != nil && closureOutcome == nil && parentID == nil
+        state.isLive && launch.preset.kind.isAgent && nativeConversationID != nil && closureOutcome == nil && parentID == nil && suspendedAt == nil
     }
 }

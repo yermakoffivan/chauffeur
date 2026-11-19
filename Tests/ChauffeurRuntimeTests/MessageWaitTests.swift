@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import ChauffeurCore
+import CSQLite
 @testable import ChauffeurRuntimeKit
 
 /// A session that ends its turn to wait for a message (`awaitReply`, `chauffeur_await_message`).
@@ -44,6 +45,89 @@ struct MessageWaitTests {
         _ = try await f.ledger.send(caller: f.peer, recipientID: f.waiter.sessionID, body: "8080", retryKey: "answer")
         #expect(try await f.ledger.claimInboxHint(caller: f.waiter, event: "PostToolUse", toolUseID: "tool").count == 1)
         #expect(try await !awaiting(f), "Mentioning the answer ends the wait")
+    }
+
+    @Test func mailQueuedBeforeTheWaitDoesNotEndIt() async throws {
+        let f = try await fixture(); defer { f.cleanup() }
+        // The peer's earlier message is still queued when the session arms the wait, then reads it.
+        _ = try await f.ledger.send(caller: f.peer, recipientID: f.waiter.sessionID, body: "Earlier", retryKey: "earlier")
+        try await f.ledger.awaitMessage(caller: f.waiter, from: f.peer.sessionID, until: later())
+        #expect(try await f.ledger.inbox(caller: f.waiter).count == 1)
+        #expect(try await awaiting(f), "The earlier message isn't the one the session waits for")
+        // A typed wake mentions the earlier mail but leaves the wait armed.
+        _ = try await f.ledger.send(caller: f.peer, recipientID: f.waiter.sessionID, body: "Also earlier", retryKey: "also")
+        try await f.ledger.awaitMessage(caller: f.waiter, from: nil, until: later())
+        let early = try await f.ledger.claimReplyWake(caller: f.waiter)
+        #expect(early.messageIDs.count == 1)
+        try await f.ledger.finishReplyWake(caller: f.waiter, early)
+        #expect(try await f.ledger.isAwaitingMessage(sessionID: f.waiter.sessionID))
+        _ = try await f.ledger.inbox(caller: f.waiter)
+
+        _ = try await f.ledger.send(caller: f.peer, recipientID: f.waiter.sessionID, body: "Answer", retryKey: "answer")
+        #expect(try await f.ledger.inbox(caller: f.waiter).contains { $0.body == "Answer" })
+        #expect(try await !awaiting(f), "The new message answers both waits")
+    }
+
+    @Test func mailAfterTheNewestMessageWasDeletedStillAnswersTheWait() async throws {
+        let f = try await fixture(); defer { f.cleanup() }
+        _ = try await f.ledger.send(caller: f.other, recipientID: f.waiter.sessionID, body: "Newest", retryKey: "newest")
+        try await f.ledger.awaitMessage(caller: f.waiter, from: nil, until: later())
+        // Deleting a finished session deletes its mail, so SQLite could hand its rowid to the next message.
+        try await f.ledger.forget(sessionID: f.other.sessionID)
+        _ = try await f.ledger.send(caller: f.peer, recipientID: f.waiter.sessionID, body: "Answer", retryKey: "answer")
+        #expect(try await f.ledger.inbox(caller: f.waiter).map(\.body) == ["Answer"])
+        #expect(try await !awaiting(f))
+    }
+
+    @Test func retryingASendKeepsAReplyThatAlreadyArrived() async throws {
+        let f = try await fixture(); defer { f.cleanup() }
+        _ = try await f.ledger.send(caller: f.waiter, recipientID: f.peer.sessionID, body: "Which port?", retryKey: "ask", awaitReplyUntil: later())
+        _ = try await f.ledger.send(caller: f.peer, recipientID: f.waiter.sessionID, body: "8080", retryKey: "answer")
+        // The first response was lost, so the session sends the identical message again.
+        _ = try await f.ledger.send(caller: f.waiter, recipientID: f.peer.sessionID, body: "Which port?", retryKey: "ask", awaitReplyUntil: later())
+        #expect(try await f.ledger.inbox(caller: f.waiter).map(\.body) == ["8080"])
+        #expect(try await !awaiting(f), "The reply answers the retried question")
+    }
+
+    @Test func finishingAWakeLeavesAWaitArmedAgainWithTheSameDeadline() async throws {
+        let f = try await fixture(); defer { f.cleanup() }
+        let deadline = later()
+        try await f.ledger.awaitMessage(caller: f.waiter, from: f.peer.sessionID, until: deadline)
+        _ = try await f.ledger.send(caller: f.peer, recipientID: f.waiter.sessionID, body: "Answer", retryKey: "answer")
+        let wake = try await f.ledger.claimReplyWake(caller: f.waiter)
+        try await f.ledger.awaitMessage(caller: f.waiter, from: f.peer.sessionID, until: deadline)
+        try await f.ledger.finishReplyWake(caller: f.waiter, wake)
+        #expect(try await awaiting(f))
+    }
+
+    @Test func aLedgerFromAnEarlierBuildKeepsItsMessageOrderAndWaits() async throws {
+        let root = URL(fileURLWithPath: "/tmp/chauffeur-await-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("ledger.sqlite").path
+        // The tables as the first build with message waits created them.
+        var old: OpaquePointer?
+        #expect(sqlite3_open(path, &old) == SQLITE_OK)
+        #expect(sqlite3_exec(old, """
+            CREATE TABLE messages (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, group_id TEXT NOT NULL, sender_id TEXT NOT NULL, recipient_id TEXT NOT NULL,
+              retry_key TEXT NOT NULL, request_hash TEXT NOT NULL, state TEXT NOT NULL, record TEXT NOT NULL, UNIQUE(sender_id, retry_key));
+            INSERT INTO messages VALUES ('a','p','g','s','r','k1','h','acknowledged','{}'), ('b','p','g','s','r','k2','h','acknowledged','{}');
+            CREATE TABLE reply_waits (session_id TEXT NOT NULL, peer_id TEXT NOT NULL, peer_title TEXT NOT NULL, until REAL NOT NULL, PRIMARY KEY(session_id,peer_id));
+            INSERT INTO reply_waits VALUES ('w','','',\(Date().addingTimeInterval(600).timeIntervalSince1970));
+            """, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(old)
+        let ledger = try Ledger(path: path)
+        let waiter = LedgerTests().session(project: UUID(), group: UUID())
+        try await ledger.register(waiter)
+        let caller = try await ledger.authenticate(ledger.issueGrant(sessionID: waiter.id))
+        try await ledger.awaitMessage(caller: caller, from: nil, until: Date().addingTimeInterval(600))
+        var peer = LedgerTests().session(project: waiter.projectID, group: waiter.groupID); peer.title = "Peer"
+        try await ledger.register(peer)
+        let peerCaller = try await ledger.authenticate(ledger.issueGrant(sessionID: peer.id))
+        // New mail is numbered after the migrated messages, so it answers the wait.
+        _ = try await ledger.send(caller: peerCaller, recipientID: waiter.id, body: "Hi", retryKey: "hi")
+        #expect(try await ledger.inbox(caller: caller).count == 1)
+        #expect(try await !ledger.isAwaitingMessage(sessionID: waiter.id))
     }
 
     @Test func aWaitForAnyoneEndsWithTheFirstMessageDelivered() async throws {

@@ -148,7 +148,7 @@ public actor Ledger {
     private func collectWork(caller: Caller, delegations: [Delegation], baseline: [UUID: SessionState], unmentionedMailOnly: Bool) throws -> WorkReport {
         var report = WorkReport(reason: .work)
         var counted: [UUID] = []
-        var senders: [UUID] = []
+        var surfaced: [UUID] = []
         try transaction {
             var budget = WorkReport.printedResultBudget
             let queued = try rows("SELECT m.record, EXISTS (SELECT 1 FROM inbox_hints h WHERE h.message_id=m.id) FROM messages m WHERE m.recipient_id=? AND m.project_id=? AND m.group_id=? AND m.state='queued' ORDER BY m.rowid", [caller.sessionID.uuidString] + scopeValues(caller))
@@ -156,17 +156,17 @@ public actor Ledger {
                 var message = try decode(Message.self, row[0])
                 guard let delegationID = message.delegationID, let delegation = delegations.first(where: { $0.id == delegationID }),
                       message.body.utf8.count <= budget else {
-                    if !unmentionedMailOnly || row[1] == "0" { report.queuedMessages += 1; counted.append(message.id); senders.append(message.senderID) }
+                    if !unmentionedMailOnly || row[1] == "0" { report.queuedMessages += 1; counted.append(message.id); surfaced.append(message.id) }
                     continue
                 }
-                senders.append(message.senderID)
+                surfaced.append(message.id)
                 budget -= message.body.utf8.count
                 let worker = (try? peer(delegation.childID, caller: caller))?.title ?? "Worker"
                 report.results.append(WorkReport.Result(messageID: message.id, delegationID: delegationID, worker: worker, body: message.body))
                 message.state = .acknowledged; message.receivedAt = message.receivedAt ?? Date(); message.acknowledgedAt = Date()
                 try saveMessage(message)
             }
-            try endReplyWaits(caller.sessionID, senders: senders)
+            try endReplyWaits(caller.sessionID, answeredBy: surfaced)
             let stopped = try stoppedReplyPeers(caller.sessionID)
             report.stoppedPeers = stopped.map(\.title)
             try endReplyWaits(caller.sessionID, peers: stopped.compactMap(\.peerID))
@@ -203,8 +203,9 @@ public actor Ledger {
           id TEXT PRIMARY KEY, project_id TEXT NOT NULL, group_id TEXT NOT NULL,
           sender_id TEXT NOT NULL REFERENCES sessions(id), recipient_id TEXT NOT NULL REFERENCES sessions(id),
           retry_key TEXT NOT NULL, request_hash TEXT NOT NULL, state TEXT NOT NULL, record TEXT NOT NULL,
-          UNIQUE(sender_id, retry_key)
+          seq INTEGER, UNIQUE(sender_id, retry_key)
         );
+        CREATE TABLE IF NOT EXISTS message_sequence (id INTEGER PRIMARY KEY CHECK (id = 1), last INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS inbox ON messages(recipient_id, state);
         CREATE TABLE IF NOT EXISTS message_tombstones (
           sender_id TEXT NOT NULL, retry_key TEXT NOT NULL, request_hash TEXT NOT NULL,
@@ -244,7 +245,7 @@ public actor Ledger {
         CREATE TABLE IF NOT EXISTS inbox_hint_stops (session_id TEXT PRIMARY KEY, native_turn_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS reply_waits (
           session_id TEXT NOT NULL, peer_id TEXT NOT NULL, peer_title TEXT NOT NULL, until REAL NOT NULL,
-          PRIMARY KEY(session_id,peer_id)
+          after_message INTEGER NOT NULL DEFAULT 0, arm_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id,peer_id)
         );
         """
         guard sqlite3_exec(connection.handle, schema, nil, nil, nil) == SQLITE_OK else { throw ChauffeurError("ledger_schema", "Cannot initialize coordination ledger") }
@@ -253,6 +254,27 @@ public actor Ledger {
             guard sqlite3_exec(connection.handle, "ALTER TABLE worker_recoveries ADD COLUMN adopted_ids TEXT", nil, nil, nil) == SQLITE_OK else { throw ChauffeurError("ledger_schema", "Cannot migrate recovery receipts") }
         }
         sqlite3_finalize(column)
+        // Builds from before 2026-11-20 ended a wait with mail that was already queued when it was armed.
+        var afterMessage: OpaquePointer?
+        if sqlite3_prepare_v2(connection.handle, "SELECT after_message FROM reply_waits LIMIT 0", -1, &afterMessage, nil) != SQLITE_OK {
+            guard sqlite3_exec(connection.handle, "ALTER TABLE reply_waits ADD COLUMN after_message INTEGER NOT NULL DEFAULT 0", nil, nil, nil) == SQLITE_OK else { throw ChauffeurError("ledger_schema", "Cannot migrate message waits") }
+        }
+        sqlite3_finalize(afterMessage)
+        var armID: OpaquePointer?
+        if sqlite3_prepare_v2(connection.handle, "SELECT arm_id FROM reply_waits LIMIT 0", -1, &armID, nil) != SQLITE_OK {
+            guard sqlite3_exec(connection.handle, "ALTER TABLE reply_waits ADD COLUMN arm_id TEXT NOT NULL DEFAULT ''", nil, nil, nil) == SQLITE_OK else { throw ChauffeurError("ledger_schema", "Cannot migrate message waits") }
+        }
+        sqlite3_finalize(armID)
+        // Messages are numbered from a counter that never goes back, unlike rowids after a deletion,
+        // so a wait can tell mail that arrived after it was armed. Older messages keep their order.
+        var sequence: OpaquePointer?
+        if sqlite3_prepare_v2(connection.handle, "SELECT seq FROM messages LIMIT 0", -1, &sequence, nil) != SQLITE_OK {
+            guard sqlite3_exec(connection.handle, "ALTER TABLE messages ADD COLUMN seq INTEGER; UPDATE messages SET seq=rowid;", nil, nil, nil) == SQLITE_OK else { throw ChauffeurError("ledger_schema", "Cannot migrate message order") }
+        }
+        sqlite3_finalize(sequence)
+        guard sqlite3_exec(connection.handle, "INSERT OR IGNORE INTO message_sequence(id,last) VALUES(1, MAX((SELECT COALESCE(MAX(seq),0) FROM messages), (SELECT COALESCE(MAX(after_message),0) FROM reply_waits)))", nil, nil, nil) == SQLITE_OK else {
+            throw ChauffeurError("ledger_schema", "Cannot initialize message order")
+        }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
     }
     private var database: OpaquePointer { connection.handle }
@@ -435,7 +457,14 @@ public actor Ledger {
         let requestHash = JSONCoding.digest(try JSONCoding.encode(hashParts))
         return try transaction {
             let recipient = try peer(recipientID, caller: caller)
-            if let awaitReplyUntil { try armReplyWait(sessionID: caller.sessionID, peer: recipient, until: awaitReplyUntil) }
+            // The wait starts from the sent message, so a retry keeps a reply that arrived since.
+            func armed(_ message: Message) throws -> Message {
+                if let awaitReplyUntil {
+                    let sent = try rows("SELECT COALESCE(seq,0) FROM messages WHERE id=?", [message.id.uuidString]).first.flatMap { Int64($0[0]) } ?? 0
+                    try armReplyWait(sessionID: caller.sessionID, peer: recipient, until: awaitReplyUntil, after: sent)
+                }
+                return message
+            }
             if let replyToID {
                 let original = try message(replyToID, caller: caller)
                 guard original.recipientID == caller.sessionID, original.senderID == recipientID else { throw denied() }
@@ -447,15 +476,16 @@ public actor Ledger {
             }
             if let row = try rows("SELECT request_hash,record FROM messages WHERE sender_id=? AND retry_key=?", [caller.sessionID.uuidString, retryKey]).first {
                 guard row[0] == requestHash else { throw ChauffeurError("retry_conflict", "Retry key was already used for different message content") }
-                return try decode(Message.self, row[1])
+                return try armed(decode(Message.self, row[1]))
             }
             var message = Message(scope: caller.scope, senderID: caller.sessionID, recipientID: recipientID, body: body, references: references, replyToID: replyToID, delegationID: delegationID)
             message.turnID = turnID
-            try execute("INSERT INTO messages(id,project_id,group_id,sender_id,recipient_id,retry_key,request_hash,state,record) VALUES(?,?,?,?,?,?,?,?,?)", [message.id.uuidString] + scopeValues(caller) + [caller.sessionID.uuidString, recipientID.uuidString, retryKey, requestHash, message.state.rawValue, try encode(message)])
+            try execute("UPDATE message_sequence SET last=last+1 WHERE id=1")
+            try execute("INSERT INTO messages(id,project_id,group_id,sender_id,recipient_id,retry_key,request_hash,state,record,seq) VALUES(?,?,?,?,?,?,?,?,?,(SELECT last FROM message_sequence WHERE id=1))", [message.id.uuidString] + scopeValues(caller) + [caller.sessionID.uuidString, recipientID.uuidString, retryKey, requestHash, message.state.rawValue, try encode(message)])
             try enqueueNotification(session: peer(recipientID, caller: caller), reason: delegationID == nil ? .message : .result)
             wakeInbox(recipientID)
             messageChanged.yield()
-            return message
+            return try armed(message)
         }
     }
     public func message(_ id: UUID, caller: Caller) throws -> Message {
@@ -477,7 +507,7 @@ public actor Ledger {
                 var item = try decode(Message.self, row[0]); item.state = .received; item.receivedAt = item.receivedAt ?? Date()
                 try saveMessage(item); return item
             }
-            try endReplyWaits(caller.sessionID, senders: delivered.map(\.senderID))
+            try endReplyWaits(caller.sessionID, answeredBy: delivered.map(\.id))
             return delivered
         }
     }
@@ -509,16 +539,16 @@ public actor Ledger {
             let claimed = try rows("SELECT m.id,m.record FROM messages m WHERE m.recipient_id=? AND m.project_id=? AND m.group_id=? AND m.state='queued' AND NOT EXISTS (SELECT 1 FROM inbox_hints h WHERE h.message_id=m.id) ORDER BY m.rowid", [session] + scopeValues(caller))
             let now = String(Date().timeIntervalSince1970)
             var summary = InboxHintSummary()
-            var senders: [UUID] = []
+            var mentioned: [UUID] = []
             for row in claimed {
                 try execute("INSERT INTO inbox_hints(message_id,recipient_id,event,native_turn_id,created_at) VALUES(?,?,?,?,?)", [row[0], session, event, nativeTurnID, now])
                 summary.count += 1
                 let message = try decode(Message.self, row[1])
                 if message.delegationID != nil { summary.results += 1 }
-                senders.append(message.senderID)
+                mentioned.append(message.id)
             }
             // The session now knows the mail is there; reading it is up to the turn.
-            try endReplyWaits(caller.sessionID, senders: senders)
+            try endReplyWaits(caller.sessionID, answeredBy: mentioned)
             if event == "Stop", summary.count > 0 {
                 summary.block = true
                 try execute("INSERT INTO inbox_hint_stops(session_id,native_turn_id) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET native_turn_id=excluded.native_turn_id", [session, nativeTurnID ?? ""])
@@ -548,37 +578,41 @@ public actor Ledger {
     public static let replyWaitLimit: TimeInterval = 4 * 60 * 60
     /// `peer_id` of a wait that any sender's message ends.
     private static let anySender = ""
-    private struct ReplyWait { var peerID: UUID?; var title: String; var until: String }
+    private struct ReplyWait { var peerID: UUID?; var title: String; var afterMessage: Int64; var armID: String }
 
     /// Arms a wait for the caller's next message from `peerID`, or from anyone, so a
     /// session that ends its turn is woken when it arrives (or when that peer stops).
-    /// The wait ends once a hook, a wait or `chauffeur_inbox` surfaces matching mail, or at `until`.
+    /// The wait ends once a hook, a wait or `chauffeur_inbox` surfaces matching mail that arrived
+    /// after it was armed, or at `until`. Mail already queued can wake the session but doesn't end it,
+    /// since a session usually arms a wait right before reading what is already there.
     public func awaitMessage(caller: Caller, from peerID: UUID?, until: Date) throws {
         try transaction { try armReplyWait(sessionID: caller.sessionID, peer: peerID.map { try peer($0, caller: caller) }, until: until) }
     }
     public func isAwaitingMessage(sessionID: UUID) throws -> Bool { try !replyWaits(sessionID).isEmpty }
-    private func armReplyWait(sessionID: UUID, peer: Session?, until: Date) throws {
-        try execute("INSERT INTO reply_waits(session_id,peer_id,peer_title,until) VALUES(?,?,?,?) ON CONFLICT(session_id,peer_id) DO UPDATE SET peer_title=excluded.peer_title,until=excluded.until",
-                    [sessionID.uuidString, peer?.id.uuidString ?? Self.anySender, peer?.title ?? "", String(until.timeIntervalSince1970)])
+    /// `after` is the last message the wait doesn't count; by default, the newest one.
+    private func armReplyWait(sessionID: UUID, peer: Session?, until: Date, after: Int64? = nil) throws {
+        let last = try after ?? rows("SELECT last FROM message_sequence WHERE id=1").first.flatMap { Int64($0[0]) } ?? 0
+        try execute("INSERT INTO reply_waits(session_id,peer_id,peer_title,until,after_message,arm_id) VALUES(?,?,?,?,?,?) ON CONFLICT(session_id,peer_id) DO UPDATE SET peer_title=excluded.peer_title,until=excluded.until,after_message=excluded.after_message,arm_id=excluded.arm_id",
+                    [sessionID.uuidString, peer?.id.uuidString ?? Self.anySender, peer?.title ?? "", String(until.timeIntervalSince1970), String(last), UUID().uuidString])
     }
     /// Unexpired waits; expired ones are dropped.
     private func replyWaits(_ sessionID: UUID) throws -> [ReplyWait] {
         let now = Date().timeIntervalSince1970
         var waits: [ReplyWait] = []
-        for row in try rows("SELECT peer_id,peer_title,until FROM reply_waits WHERE session_id=?", [sessionID.uuidString]) {
+        for row in try rows("SELECT peer_id,peer_title,until,after_message,arm_id FROM reply_waits WHERE session_id=?", [sessionID.uuidString]) {
             if (Double(row[2]) ?? 0) <= now {
                 try execute("DELETE FROM reply_waits WHERE session_id=? AND peer_id=?", [sessionID.uuidString, row[0]])
             } else {
-                waits.append(ReplyWait(peerID: UUID(uuidString: row[0]), title: row[1], until: row[2]))
+                waits.append(ReplyWait(peerID: UUID(uuidString: row[0]), title: row[1], afterMessage: Int64(row[3]) ?? 0, armID: row[4]))
             }
         }
         return waits
     }
-    /// Mail from `senders` ends the waits for them, and any mail ends a wait for anyone.
-    private func endReplyWaits(_ sessionID: UUID, senders: [UUID]) throws {
-        guard !senders.isEmpty else { return }
-        for id in Set(senders.map(\.uuidString)).union([Self.anySender]) {
-            try execute("DELETE FROM reply_waits WHERE session_id=? AND peer_id=?", [sessionID.uuidString, id])
+    /// Surfaced mail ends the waits armed before it arrived: for its sender, and for anyone.
+    private func endReplyWaits(_ sessionID: UUID, answeredBy messages: [UUID]) throws {
+        for id in Set(messages.map(\.uuidString)) {
+            try execute("DELETE FROM reply_waits WHERE session_id=? AND EXISTS (SELECT 1 FROM messages m WHERE m.id=? AND COALESCE(m.seq,0) > reply_waits.after_message AND (reply_waits.peer_id=? OR reply_waits.peer_id=m.sender_id))",
+                        [sessionID.uuidString, id, Self.anySender])
         }
     }
     private func endReplyWaits(_ sessionID: UUID, peers: [UUID]) throws {
@@ -606,7 +640,7 @@ public actor Ledger {
         fileprivate var senderIDs: [UUID] = []
         /// The waits this wake ends, as armed when it was claimed: one armed again meanwhile stays.
         fileprivate var ends: [Ended] = []
-        fileprivate struct Ended: Sendable, Equatable { var peer: String; var until: String }
+        fileprivate struct Ended: Sendable, Equatable { var peer: String; var armID: String }
         public init() {}
         public var isEmpty: Bool { messageIDs.isEmpty && stopped.isEmpty }
     }
@@ -621,15 +655,17 @@ public actor Ledger {
             let waits = try replyWaits(caller.sessionID)
             guard !waits.isEmpty else { return wake }
             let awaited = Set(waits.compactMap(\.peerID)), anyone = waits.contains { $0.peerID == nil }
-            let queued = try rows("SELECT m.id,m.sender_id FROM messages m WHERE m.recipient_id=? AND m.project_id=? AND m.group_id=? AND m.state='queued' AND NOT EXISTS (SELECT 1 FROM inbox_hints h WHERE h.message_id=m.id) ORDER BY m.rowid", [caller.sessionID.uuidString] + scopeValues(caller))
+            let queued = try rows("SELECT m.id,m.sender_id,COALESCE(m.seq,0) FROM messages m WHERE m.recipient_id=? AND m.project_id=? AND m.group_id=? AND m.state='queued' AND NOT EXISTS (SELECT 1 FROM inbox_hints h WHERE h.message_id=m.id) ORDER BY m.rowid", [caller.sessionID.uuidString] + scopeValues(caller))
             let now = String(Date().timeIntervalSince1970)
-            var answered: Set<UUID> = []
+            // Mail this wake mentions, by sender and arrival: only mail newer than a wait answers it.
+            var answers: [(sender: UUID, row: Int64)] = []
             for id in mentioned {
-                if let sender = try rows("SELECT sender_id FROM messages WHERE id=? AND recipient_id=?", [id.uuidString, caller.sessionID.uuidString]).first.flatMap({ UUID(uuidString: $0[0]) }) { answered.insert(sender) }
+                if let row = try rows("SELECT sender_id,COALESCE(seq,0) FROM messages WHERE id=? AND recipient_id=?", [id.uuidString, caller.sessionID.uuidString]).first,
+                   let sender = UUID(uuidString: row[0]) { answers.append((sender, Int64(row[1]) ?? 0)) }
             }
             for row in queued {
                 guard let id = UUID(uuidString: row[0]), let sender = UUID(uuidString: row[1]), anyone || awaited.contains(sender) else { continue }
-                answered.insert(sender)
+                answers.append((sender, Int64(row[2]) ?? 0))
                 try execute("INSERT INTO inbox_hints(message_id,recipient_id,event,native_turn_id,created_at) VALUES(?,?,?,?,?)", [row[0], caller.sessionID.uuidString, "ReplyWake", nil, now])
                 wake.messageIDs.append(id)
                 if !wake.senderIDs.contains(sender) {
@@ -639,18 +675,19 @@ public actor Ledger {
             }
             let stopped = Set(try stoppedReplyPeers(caller.sessionID).compactMap(\.peerID))
             for wait in waits {
-                if let id = wait.peerID {
-                    if answered.contains(id) {} else if stopped.contains(id) { wake.stopped.append(wait.title) } else { continue }
-                } else if answered.isEmpty { continue }
-                wake.ends.append(.init(peer: wait.peerID?.uuidString ?? Self.anySender, until: wait.until))
+                let answered = answers.contains { $0.row > wait.afterMessage && (wait.peerID == nil || $0.sender == wait.peerID) }
+                if !answered {
+                    guard let id = wait.peerID, stopped.contains(id), !answers.contains(where: { $0.sender == id }) else { continue }
+                    wake.stopped.append(wait.title)
+                }
+                wake.ends.append(.init(peer: wait.peerID?.uuidString ?? Self.anySender, armID: wait.armID))
             }
             return wake
         }
     }
     public func finishReplyWake(caller: Caller, _ wake: ReplyWake) throws {
         try transaction {
-            // `until` came back as text, which may round the stored REAL.
-            for end in wake.ends { try execute("DELETE FROM reply_waits WHERE session_id=? AND peer_id=? AND ABS(until - ?) < 0.001", [caller.sessionID.uuidString, end.peer, end.until]) }
+            for end in wake.ends { try execute("DELETE FROM reply_waits WHERE session_id=? AND peer_id=? AND arm_id=?", [caller.sessionID.uuidString, end.peer, end.armID]) }
         }
     }
     func hintRowCount() throws -> Int { Int(try rows("SELECT COUNT(*) FROM inbox_hints").first?[0] ?? "") ?? 0 }
